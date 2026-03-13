@@ -2,6 +2,9 @@
 /replyio_reference/*
 replyio_reference/
 
-
+new_user_onboarding_pages_refference/
+/new_user_onboarding_pages_refference/*
+supabase/
+/supabase/*
 .env/
 .env*

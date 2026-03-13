@@ -1,14 +1,14 @@
 import { createServerClient } from "@supabase/ssr";
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { cookies, headers } from "next/headers";
+import { getAuthCookieDomain } from "@/lib/auth-cookie-domain";
 
 export async function createClient() {
     const cookieStore = await cookies();
     const headerList = await headers();
     const host = headerList.get("host") || "";
 
-    // Manages cross-subdomain cookies for production, falls back to localhost rules
-    const isProductionDomain = host.includes("cradible5.com");
-    const cookieDomain = isProductionDomain ? ".cradible5.com" : undefined;
+    const cookieDomain = getAuthCookieDomain(host);
 
     return createServerClient(
         process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -59,23 +59,29 @@ export async function createClient() {
     );
 }
 
-// ==========================================
-// [FUTURE FEATURE]: Admin Client (Bypasses RLS Security)
-// Uncomment if your server needs to do admin tasks (e.g., Stripe webhooks).
-// Requires adding SUPABASE_SERVICE_ROLE_KEY to your .env file.
-// ==========================================
-/*
 export async function createAdminClient() {
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !serviceRoleKey) {
+    throw new Error(
+      "Missing admin Supabase env variables. Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY"
+    );
+  }
+
+  return createSupabaseClient(
+    supabaseUrl,
+    serviceRoleKey,
     {
-      cookies: {
-        // Admin clients usually don't need to read/write user cookies
-        getAll() { return []; },
-        setAll() {},
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
       },
-    }
+      global: {
+        headers: {
+          "x-application-name": "Cradible5-admin",
+        },
+      },
+    },
   );
 }
-*/

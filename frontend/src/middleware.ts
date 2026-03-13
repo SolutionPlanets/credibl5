@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { getAuthCookieDomain } from "@/lib/auth-cookie-domain";
 
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -18,19 +19,14 @@ export async function middleware(request: NextRequest) {
         return request.cookies.getAll();
       },
       setAll(cookiesToSet) {
-        // Sync cookies to the request
         cookiesToSet.forEach(({ name, value }) =>
           request.cookies.set(name, value)
         );
 
-        // Create fresh response with updated request
         supabaseResponse = NextResponse.next({ request });
 
-        // Sync cookies to the response
         const host = request.headers.get("host") || "";
-        const cookieDomain = host.includes("replypulse.com")
-          ? ".replypulse.com"
-          : undefined;
+        const cookieDomain = getAuthCookieDomain(host);
 
         cookiesToSet.forEach(({ name, value, options }) =>
           supabaseResponse.cookies.set(name, value, {
@@ -42,22 +38,22 @@ export async function middleware(request: NextRequest) {
     },
   });
 
-  // Use getUser() — CSRF-safe, validates with Supabase Auth server
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
   const isProtectedPath = request.nextUrl.pathname.startsWith("/protected");
+  const isAuthPath =
+    request.nextUrl.pathname === "/auth/login" ||
+    request.nextUrl.pathname === "/auth/signup";
 
-  // Unauthenticated user on protected route → login
   if (!user && isProtectedPath) {
     const url = request.nextUrl.clone();
     url.pathname = "/auth/login";
     return NextResponse.redirect(url);
   }
 
-  // Authenticated user on login page → dashboard
-  if (user && request.nextUrl.pathname === "/auth/login") {
+  if (user && isAuthPath) {
     const url = request.nextUrl.clone();
     url.pathname = "/protected";
     return NextResponse.redirect(url);

@@ -1,166 +1,204 @@
-import { createClient } from "@/lib/server";
+import { createAdminClient, createClient } from "@/lib/server";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import {
-  BillingCycle,
-  createPlanDates,
-  getPlanLocationLimit,
-  getStoredBillingCycle,
-} from "@/lib/plan-config";
+import { createPlanDates, getStoredBillingCycle } from "@/lib/plan-config";
+
+type CallbackFlow = "login" | "connect-google";
+
+const PROFILES_TABLE = "user_profiles";
+const GOOGLE_CONNECTIONS_TABLE = "google_business_connections";
+
+function normalizeNextPath(next: string | null): string {
+  if (!next || !next.startsWith("/")) {
+    return "/protected";
+  }
+  return next;
+}
+
+async function ensureUserProfileRow(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  email: string | null
+) {
+  await supabase.from(PROFILES_TABLE).upsert(
+    {
+      id: userId,
+      email,
+    },
+    { onConflict: "id" }
+  );
+}
+
+async function ensureSubscriptionRow(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  email: string | null
+) {
+  const { data: existingSubscription, error: lookupError } = await supabase
+    .from("subscription_plans")
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (lookupError || existingSubscription) return;
+
+  const { startDate, endDate } = createPlanDates("free", "monthly");
+
+  await supabase.from("subscription_plans").insert({
+    user_id: userId,
+    email,
+    plan_type: "free",
+    max_locations: 1,
+    billing_cycle: getStoredBillingCycle("free", "monthly"),
+    status: "trial",
+    current_period_start: startDate.toISOString(),
+    current_period_end: endDate.toISOString(),
+  });
+}
+
+async function hasStoredGoogleConnection(
+  adminClient: Awaited<ReturnType<typeof createAdminClient>>,
+  userId: string
+) {
+  const { data, error } = await adminClient
+    .from(GOOGLE_CONNECTIONS_TABLE)
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return Boolean(data);
+}
+
+async function upsertGoogleRefreshToken(
+  adminClient: Awaited<ReturnType<typeof createAdminClient>>,
+  userId: string,
+  refreshToken: string
+) {
+  const { error } = await adminClient.from(GOOGLE_CONNECTIONS_TABLE).upsert(
+    {
+      user_id: userId,
+      provider: "google",
+      refresh_token: refreshToken,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id" }
+  );
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function markGoogleConnected(
+  adminClient: Awaited<ReturnType<typeof createAdminClient>>,
+  userId: string,
+  email: string | null
+) {
+  const nowIso = new Date().toISOString();
+
+  const { data: profileData, error: profileLookupError } = await adminClient
+    .from(PROFILES_TABLE)
+    .select("google_connected_at")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (profileLookupError) {
+    throw profileLookupError;
+  }
+
+  const { error: upsertError } = await adminClient.from(PROFILES_TABLE).upsert(
+    {
+      id: userId,
+      email,
+      google_connected_at: profileData?.google_connected_at || nowIso,
+      google_last_oauth_at: nowIso,
+      onboarding_completed: true,
+    },
+    { onConflict: "id" }
+  );
+
+  if (upsertError) {
+    throw upsertError;
+  }
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const error = searchParams.get("error");
-  const error_description = searchParams.get("error_description");
-  const next = searchParams.get("next") ?? "/protected";
+  const errorDescription = searchParams.get("error_description");
+  const flow = (searchParams.get("flow") as CallbackFlow | null) || "login";
+  const next = normalizeNextPath(searchParams.get("next"));
 
-  // Get proper origin from headers
   const protocol = request.headers.get("x-forwarded-proto") || "http";
   const host = request.headers.get("host") || "localhost:3000";
   const origin = `${protocol}://${host}`;
 
-  // Handle OAuth errors from provider
   if (error) {
-    console.error("OAuth Provider Error:", error, error_description);
+    console.error("OAuth provider error:", error, errorDescription);
     return NextResponse.redirect(
-      `${origin}/auth/login?error=${encodeURIComponent(error_description || error)}`
+      `${origin}/auth/login?error=${encodeURIComponent(errorDescription || error)}`
     );
   }
 
-  if (code) {
-    const supabase = await createClient();
+  if (!code) {
+    return NextResponse.redirect(`${origin}/auth/login?error=no_code`);
+  }
 
-    // Exchange the code for a session
-    const { data, error: exchangeError } =
-      await supabase.auth.exchangeCodeForSession(code);
+  const supabase = await createClient();
+  const { data, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
 
-    if (exchangeError || !data.session) {
-      console.error("Code exchange error:", exchangeError);
-      const errorMsg = exchangeError?.message || "authentication_failed";
-      return NextResponse.redirect(
-        `${origin}/auth/login?error=${encodeURIComponent(errorMsg)}`
-      );
-    }
+  if (exchangeError || !data.session) {
+    console.error("Code exchange error:", exchangeError);
+    const errorMsg = exchangeError?.message || "oauth_callback_failed";
+    return NextResponse.redirect(
+      `${origin}/auth/login?error=${encodeURIComponent(errorMsg)}`
+    );
+  }
 
-    const user = data.session.user;
+  const userId = data.session.user.id;
+  const userEmail = data.session.user.email ?? null;
 
+  await ensureUserProfileRow(supabase, userId, userEmail);
+  await ensureSubscriptionRow(supabase, userId, userEmail);
+
+  const providerRefreshToken = data.session.provider_refresh_token;
+
+  if (flow === "connect-google") {
     try {
-      // Check if user has a subscription
-      const { data: subscriptionData, error: subError } = await supabase
-        .from("subscription_plans")
-        .select("*")
-        .eq("user_id", user.id)
-        .single();
+      const adminClient = await createAdminClient();
+      const hasExistingConnection = await hasStoredGoogleConnection(adminClient, userId);
 
-      const isRegisteredUser = !!subscriptionData && !subError;
-
-      // Check for pending signup data in cookies
-      const pendingSignup = request.cookies.get("pending_signup")?.value;
-      let isSignup = false;
-      let signupData: {
-        plan?: string;
-        billing?: string;
-        maxLocations?: number;
-      } = {};
-
-      if (pendingSignup) {
-        try {
-          const parsed = JSON.parse(pendingSignup);
-          // Check if signup data is recent (within 10 minutes)
-          if (
-            parsed.timestamp &&
-            Date.now() - parsed.timestamp < 10 * 60 * 1000
-          ) {
-            isSignup = parsed.isSignup === true;
-            signupData = {
-              plan: parsed.plan || "free",
-              billing: parsed.billing || "monthly",
-              maxLocations: parsed.maxLocations || 1,
-            };
-          }
-        } catch (e) {
-          console.error("Error parsing signup data:", e);
-        }
+      if (!providerRefreshToken && !hasExistingConnection) {
+        return NextResponse.redirect(`${origin}${next}?google=missing_refresh_token`);
       }
 
-      if (isSignup) {
-        // === SIGNUP FLOW ===
-        if (isRegisteredUser) {
-          // Already has account, go to dashboard
-          const response = NextResponse.redirect(`${origin}/protected`);
-          response.cookies.delete("pending_signup");
-          return response;
-        }
-
-        // New user — create subscription
-        const planType = signupData.plan || "free";
-        const billingCycle = signupData.billing || "monthly";
-        const maxLocations =
-          signupData.maxLocations || getPlanLocationLimit(planType);
-        const planStatus = planType === "free" ? "trial" : "active";
-
-        const { startDate, endDate } = createPlanDates(
-          planType,
-          billingCycle as BillingCycle
-        );
-
-        const { error: insertError } = await supabase
-          .from("subscription_plans")
-          .insert({
-            user_id: user.id,
-            email: user.email,
-            plan_type: planType,
-            max_locations: maxLocations,
-            billing_cycle: getStoredBillingCycle(
-              planType,
-              billingCycle as BillingCycle
-            ),
-            status: planStatus,
-            current_period_start: startDate.toISOString(),
-            current_period_end: endDate.toISOString(),
-          });
-
-        if (insertError) {
-          console.error("Error creating subscription:", insertError);
-          return NextResponse.redirect(
-            `${origin}/auth/signup?error=create_failed`
-          );
-        }
-
-        console.log(
-          `Created subscription for ${user.email}: ${planType} (${billingCycle})`
-        );
-        const response = NextResponse.redirect(
-          `${origin}/protected?welcome=true&plan=${planType}`
-        );
-        response.cookies.delete("pending_signup");
-        return response;
-      } else {
-        // === LOGIN FLOW ===
-        if (!isRegisteredUser) {
-          // Unregistered user trying to login — redirect to signup
-          // This forces consent screen to capture refresh_token
-          const response = NextResponse.redirect(
-            `${origin}/auth/signup?unregistered=true&email=${encodeURIComponent(user.email || "")}`
-          );
-          response.cookies.delete("pending_signup");
-          return response;
-        }
-
-        // Existing user — go to dashboard
-        const response = NextResponse.redirect(`${origin}${next}`);
-        response.cookies.delete("pending_signup");
-        return response;
+      if (providerRefreshToken) {
+        await upsertGoogleRefreshToken(adminClient, userId, providerRefreshToken);
       }
-    } catch (error) {
-      console.error("Callback error:", error);
-      return NextResponse.redirect(
-        `${origin}/auth/login?error=server_error`
-      );
+
+      await markGoogleConnected(adminClient, userId, userEmail);
+      return NextResponse.redirect(`${origin}${next}?google=connected`);
+    } catch (saveError) {
+      console.error("Failed to store Google connection:", saveError);
+      return NextResponse.redirect(`${origin}${next}?google=save_failed`);
     }
   }
 
-  // No code parameter
-  return NextResponse.redirect(`${origin}/auth/login?error=no_code`);
+  if (providerRefreshToken) {
+    try {
+      const adminClient = await createAdminClient();
+      await upsertGoogleRefreshToken(adminClient, userId, providerRefreshToken);
+      await markGoogleConnected(adminClient, userId, userEmail);
+    } catch (saveError) {
+      // Login should still succeed even if token persistence fails.
+      console.error("Unable to persist Google refresh token on login:", saveError);
+    }
+  }
+
+  return NextResponse.redirect(`${origin}${next}`);
 }

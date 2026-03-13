@@ -3,219 +3,283 @@
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/client";
 import { Button } from "@/components/ui/button";
-import { AlertCircle, X } from "lucide-react";
+import { AlertCircle, Mail, Lock } from "lucide-react";
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
-
-interface UserNotFoundPopupProps {
-  isOpen: boolean;
-  onClose: () => void;
-  onSignUp: () => void;
-}
-
-function UserNotFoundPopup({
-  isOpen,
-  onClose,
-  onSignUp,
-}: UserNotFoundPopupProps) {
-  if (!isOpen) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="relative w-full max-w-sm mx-4 bg-white border border-gray-200 rounded-3xl shadow-2xl p-8 animate-in zoom-in-95 duration-200">
-        <button
-          onClick={onClose}
-          className="absolute top-4 right-4 text-reply-muted hover:text-reply-navy transition-colors"
-        >
-          <X className="w-5 h-5" />
-        </button>
-
-        <div className="flex flex-col items-center text-center">
-          <div className="w-14 h-14 bg-orange-50 border border-orange-100 rounded-full flex items-center justify-center mb-4">
-            <AlertCircle className="w-7 h-7 text-orange-500" />
-          </div>
-
-          <h3 className="text-xl font-bold text-reply-navy mb-2">
-            Account Not Found
-          </h3>
-          <p className="text-reply-muted text-sm mb-2">
-            It looks like you don&apos;t have an account yet.
-          </p>
-          <p className="text-reply-navy/80 text-xs mb-6 bg-reply-purple/5 p-3 rounded-xl border border-reply-purple/10">
-            You need to sign up and choose a plan to get started with Reply
-            Pulse.
-          </p>
-
-          <div className="flex flex-col gap-3 w-full">
-            <Button
-              onClick={onSignUp}
-              className="w-full h-11 bg-reply-navy text-white font-semibold hover:bg-reply-navy/90 transition-all"
-            >
-              Create Account
-            </Button>
-            <button
-              onClick={onClose}
-              className="text-sm text-reply-muted hover:text-reply-navy transition-colors"
-            >
-              Try a different account
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export function LoginForm({
   className,
   ...props
 }: React.ComponentPropsWithoutRef<"div">) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [showNotFoundPopup, setShowNotFoundPopup] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [isPasswordLoading, setIsPasswordLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [isResendLoading, setIsResendLoading] = useState(false);
   const searchParams = useSearchParams();
   const router = useRouter();
 
   useEffect(() => {
     const errorParam = searchParams.get("error");
-    if (errorParam === "user_not_found") {
-      setShowNotFoundPopup(true);
-    } else if (errorParam) {
-      const decodedError = decodeURIComponent(errorParam.replace(/\+/g, " "));
+    if (!errorParam) return;
 
-      const errorMessages: Record<string, string> = {
-        session_failed:
-          "Authentication session failed. Please try signing in again.",
-        authentication_failed: "Authentication failed. Please try again.",
-        access_denied: "Access was denied. Please try again.",
-        invalid_request: "Invalid authentication request. Please try again.",
-      };
+    const decodedError = decodeURIComponent(errorParam.replace(/\+/g, " "));
 
-      setError(errorMessages[errorParam] || decodedError);
-    }
+    const errorMessages: Record<string, string> = {
+      session_failed: "Authentication session failed. Please try signing in again.",
+      authentication_failed: "Authentication failed. Please try again.",
+      oauth_callback_failed: "Google sign-in failed. Please try again.",
+      access_denied: "Access was denied. Please try again.",
+      invalid_request: "Invalid authentication request. Please try again.",
+    };
+
+    setError(errorMessages[errorParam] || decodedError);
+    setNotice(null);
   }, [searchParams]);
 
-  const handleGoogleSignInClick = async (e: React.FormEvent) => {
+  const handlePasswordSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
 
     const supabase = createClient();
-    setIsLoading(true);
+    setIsPasswordLoading(true);
     setError(null);
+    setNotice(null);
 
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (signInError) throw signInError;
+
+      router.push("/protected");
+      router.refresh();
+    } catch (unknownError) {
+      setError(
+        unknownError instanceof Error
+          ? unknownError.message
+          : "Unable to sign in with email/password"
+      );
+    } finally {
+      setIsPasswordLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const supabase = createClient();
+    setIsGoogleLoading(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const callbackUrl = new URL("/auth/callback", window.location.origin);
+      callbackUrl.searchParams.set("next", "/protected");
+
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
           scopes:
             "https://www.googleapis.com/auth/business.manage https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
-          redirectTo: `${window.location.origin}/auth/callback`,
+          redirectTo: callbackUrl.toString(),
           queryParams: {
             access_type: "offline",
-            // NO prompt: "consent" — returning users just pick their account
           },
         },
       });
 
-      if (error) throw error;
-    } catch (error: unknown) {
-      setError(error instanceof Error ? error.message : "An error occurred");
-      setIsLoading(false);
+      if (oauthError) throw oauthError;
+    } catch (unknownError) {
+      setError(
+        unknownError instanceof Error
+          ? unknownError.message
+          : "Unable to sign in with Google"
+      );
+      setIsGoogleLoading(false);
     }
   };
 
-  const handleSignUpRedirect = () => {
-    setShowNotFoundPopup(false);
-    router.push("/auth/signup");
+  const handleResendVerification = async () => {
+    if (!email) {
+      setError("Enter your email first, then resend verification.");
+      return;
+    }
+
+    const supabase = createClient();
+    setIsResendLoading(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const { error: resendError } = await supabase.auth.resend({
+        type: "signup",
+        email,
+        options: {
+          emailRedirectTo: `${window.location.origin}/auth/login`,
+        },
+      });
+
+      if (resendError) throw resendError;
+
+      setNotice("Verification email sent. Please check inbox/spam, then sign in.");
+    } catch (unknownError) {
+      setError(
+        unknownError instanceof Error
+          ? unknownError.message
+          : "Unable to resend verification email"
+      );
+    } finally {
+      setIsResendLoading(false);
+    }
   };
 
-  return (
-    <>
-      <UserNotFoundPopup
-        isOpen={showNotFoundPopup}
-        onClose={() => setShowNotFoundPopup(false)}
-        onSignUp={handleSignUpRedirect}
-      />
+  const isEmailNotConfirmed = Boolean(
+    error && error.toLowerCase().includes("email not confirmed")
+  );
 
-      <div className={cn("flex flex-col gap-6", className)} {...props}>
-        <div className="relative w-full max-w-md bg-white border border-gray-200 rounded-3xl shadow-xl p-8 md:p-10 animate-in zoom-in-95 duration-200">
-          <div className="flex flex-col items-center mb-8">
-            <h2 className="text-3xl font-bold text-reply-navy mb-2 text-center">
-              Welcome Back
-            </h2>
-            <p className="text-reply-muted text-center">
-              Sign in to your account to continue
-            </p>
+  return (
+    <div className={cn("flex flex-col gap-6", className)} {...props}>
+      <div className="relative w-full max-w-md bg-white border border-gray-200 rounded-3xl shadow-xl p-8 md:p-10 animate-in zoom-in-95 duration-200">
+        <div className="flex flex-col items-center mb-8">
+          <h2 className="text-3xl font-bold text-reply-navy mb-2 text-center">
+            Welcome Back
+          </h2>
+          <p className="text-reply-muted text-center">
+            Sign in with email/password or continue with Google.
+          </p>
+        </div>
+
+        <div className="space-y-6">
+          <form onSubmit={handlePasswordSignIn} className="space-y-4">
+            {error && (
+              <div className="space-y-3 rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-600">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{error}</span>
+                </div>
+                {isEmailNotConfirmed && (
+                  <button
+                    type="button"
+                    onClick={handleResendVerification}
+                    disabled={isResendLoading}
+                    className="text-left text-xs font-semibold underline underline-offset-2 hover:text-red-700 disabled:opacity-60"
+                  >
+                    {isResendLoading
+                      ? "Sending verification email..."
+                      : "Resend verification email"}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {notice && (
+              <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-700">
+                {notice}
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <label htmlFor="email" className="text-sm font-medium text-reply-navy">
+                Email
+              </label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-reply-muted" />
+                <input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  required
+                  className="w-full h-11 pl-10 pr-3 rounded-xl border border-gray-200 focus:border-reply-purple focus:outline-none"
+                  placeholder="you@company.com"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="password" className="text-sm font-medium text-reply-navy">
+                Password
+              </label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-reply-muted" />
+                <input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  required
+                  className="w-full h-11 pl-10 pr-3 rounded-xl border border-gray-200 focus:border-reply-purple focus:outline-none"
+                  placeholder="Enter your password"
+                />
+              </div>
+            </div>
+
+            <Button
+              type="submit"
+              disabled={isPasswordLoading}
+              className="w-full h-12 bg-reply-navy text-white hover:bg-reply-navy/90 font-semibold"
+            >
+              {isPasswordLoading ? "Signing in..." : "Sign in"}
+            </Button>
+          </form>
+
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t border-gray-200" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-white px-2 text-reply-muted">Or</span>
+            </div>
           </div>
 
-          <div className="space-y-6">
-            <form onSubmit={handleGoogleSignInClick} className="space-y-4">
-              {error && (
-                <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm text-center">
-                  {error}
-                </div>
+          <form onSubmit={handleGoogleSignIn} className="space-y-4">
+            <Button
+              type="submit"
+              disabled={isGoogleLoading}
+              className="w-full h-12 bg-white text-reply-navy border border-gray-200 hover:bg-gray-50 font-semibold flex items-center justify-center gap-3"
+            >
+              {!isGoogleLoading && (
+                <svg className="w-5 h-5" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                  />
+                </svg>
               )}
+              {isGoogleLoading ? "Redirecting..." : "Continue with Google"}
+            </Button>
+          </form>
 
-              <Button
-                type="submit"
-                disabled={isLoading}
-                className="w-full h-12 bg-reply-navy text-white hover:bg-reply-navy/90 font-semibold flex items-center justify-center gap-3 border-none transition-all hover:scale-[1.02] active:scale-[0.98]"
+          <div className="pt-4 border-t border-gray-100">
+            <p className="text-center text-sm text-reply-muted mb-3">
+              Don&apos;t have an account?{" "}
+              <Link
+                href="/auth/signup"
+                className="text-reply-purple hover:text-reply-purple/80 font-semibold transition-colors"
               >
-                {!isLoading && (
-                  <svg className="w-5 h-5" viewBox="0 0 24 24">
-                    <path
-                      fill="#4285F4"
-                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"
-                    />
-                    <path
-                      fill="#EA4335"
-                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
-                    />
-                  </svg>
-                )}
-                {isLoading ? "Redirecting..." : "Continue with Google"}
-              </Button>
-            </form>
-
-            <div className="pt-4 border-t border-gray-100">
-              <p className="text-center text-sm text-reply-muted mb-3">
-                Don&apos;t have an account?{" "}
-                <Link
-                  href="/auth/signup"
-                  className="text-reply-purple hover:text-reply-purple/80 font-semibold transition-colors"
-                >
-                  Sign Up
-                </Link>
-              </p>
-              <p className="text-center text-xs text-reply-muted/60">
-                By continuing, you agree to Reply Pulse&apos;s{" "}
-                <Link
-                  href="/terms"
-                  className="underline hover:text-reply-navy transition-colors"
-                >
-                  Terms of Service
-                </Link>{" "}
-                and{" "}
-                <Link
-                  href="/privacy"
-                  className="underline hover:text-reply-navy transition-colors"
-                >
-                  Privacy Policy
-                </Link>
-                .
-              </p>
-            </div>
+                Create one
+              </Link>
+            </p>
           </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }

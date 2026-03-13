@@ -1,4 +1,5 @@
 import { createBrowserClient } from "@supabase/ssr";
+import { getAuthCookieDomain } from "@/lib/auth-cookie-domain";
 
 export function createClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -11,15 +12,14 @@ export function createClient() {
   }
 
   const host = typeof window !== "undefined" ? window.location.host : "";
-  const isProductionDomain = host.includes("cradibl5.com");
-  const cookieDomain = isProductionDomain ? ".cradible5.com" : undefined;
+  const cookieDomain = getAuthCookieDomain(host);
 
   return createBrowserClient(
     supabaseUrl,
     supabaseAnonKey,
     {
       cookieOptions: {
-        domain: host.includes("replypulse.com") ? ".replypulse.com" : undefined,
+        domain: cookieDomain,
         sameSite: "lax",
         secure: typeof window !== "undefined" && window.location.protocol === "https:",
         path: "/",

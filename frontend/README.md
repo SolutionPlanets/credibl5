@@ -1,5 +1,60 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Supabase setup for Google Business OAuth
+
+Run this SQL migration in Supabase SQL editor before using Google connect:
+
+`supabase/migrations/20260312_google_business_connections.sql`
+
+Required environment variables:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY` (server-only, required for secure refresh-token storage)
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+
+## Auth Architecture Flow
+
+### 1) Account Creation (email + password)
+
+1. User submits email and password on `/auth/signup`.
+2. Supabase Auth creates `auth.users` row.
+3. DB trigger `on_auth_user_created` auto-creates `public.user_profiles` row.
+4. App calls `/api/auth/ensure-subscription` to create a default `subscription_plans` row (`free` trial) if missing.
+5. App immediately starts Google OAuth with `flow=connect-google`, `access_type=offline`, `prompt=consent`.
+
+### 2) One-time Google Connection
+
+1. Google redirects to `/auth/callback?flow=connect-google`.
+2. Callback exchanges code for session.
+3. Server reads `provider_refresh_token`.
+4. Server stores refresh token in `public.google_business_connections` using `SUPABASE_SERVICE_ROLE_KEY` (server-only client).
+5. Server updates `public.user_profiles.google_connected_at` and `google_last_oauth_at`.
+6. User is redirected to `/protected?google=connected`.
+
+### 3) Day-to-day Login
+
+1. User signs in with email/password on `/auth/login`.
+2. Supabase SSR session cookies keep them logged in (7-day cookie maxAge).
+3. Dashboard checks `user_profiles.google_connected_at`:
+   - set: dashboard loads as connected.
+   - missing: shows "Connect Google Business" empty state.
+
+### 4) Background Sync Readiness
+
+1. Backend worker/cron uses service-role client.
+2. Worker reads refresh tokens from `public.google_business_connections`.
+3. Worker fetches latest Google Business reviews and writes app data to Supabase tables.
+4. User does not need to reconnect unless Google revokes token/access.
+
+### 5) Security Model
+
+- Browser never reads refresh tokens.
+- Refresh tokens are stored only in `public.google_business_connections`.
+- `anon` and `authenticated` are revoked from that table.
+- Only `service_role` can read/write refresh tokens.
+
 ## Getting Started
 
 First, run the development server:
