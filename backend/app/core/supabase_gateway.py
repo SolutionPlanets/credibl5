@@ -108,6 +108,35 @@ class SupabaseGateway:
         if response.status_code >= 400:
             raise HTTPException(status_code=500, detail=self._postgrest_error(response))
 
+    async def get_user_subscription(self, user_id: str) -> Optional[Dict[str, Any]]:
+        url = f"{self.settings.supabase_url}/rest/v1/subscription_plans"
+        headers = self._service_headers()
+        params = {
+            "select": "id,plan_type,max_locations,status",
+            "user_id": f"eq.{user_id}",
+            "limit": "1",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return data[0] if data else None
+
+    async def count_user_locations(self, user_id: str) -> int:
+        url = f"{self.settings.supabase_url}/rest/v1/locations"
+        headers = self._service_headers()
+        params = {
+            "select": "id",
+            "user_id": f"eq.{user_id}",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return len(data)
+
     async def get_location_by_gmb_location_id(
         self, user_id: str, gmb_location_id: str
     ) -> Optional[Dict[str, Any]]:

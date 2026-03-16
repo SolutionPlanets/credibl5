@@ -23,6 +23,7 @@ import { GMBStatusAlert } from "@/components/protected/gmb-status-alert";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { AddLocationDialog } from "@/components/protected/add-location-dialog";
 
 type DashboardStat = {
   title: string;
@@ -77,6 +78,8 @@ export default function ProtectedPage() {
     onboarding_completed?: boolean | null;
   } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isAddLocationOpen, setIsAddLocationOpen] = useState(false);
+  const [locationsCount, setLocationsCount] = useState(0);
 
   useEffect(() => {
     const supabase = createClient();
@@ -95,12 +98,23 @@ export default function ProtectedPage() {
         .eq("id", user.id)
         .maybeSingle();
 
+      const { count: locCount } = await supabase
+        .from("locations")
+        .select("*", { count: 'exact', head: true })
+        .eq("user_id", user.id);
+
+      setLocationsCount(locCount || 0);
       setProfileData(profile);
       setLoading(false);
     };
 
     fetchData();
   }, [router]);
+
+  const handleLocationAdded = () => {
+    // Refresh page data
+    window.location.reload();
+  };
 
   const isGoogleConnected =
     Boolean(profileData?.google_connected_at) ||
@@ -156,7 +170,10 @@ export default function ProtectedPage() {
               Connect a location and we will start auto-syncing your latest Google activity.
             </p>
             <div className="mt-7 flex flex-wrap gap-3">
-              <Button className="h-11 rounded-xl bg-white px-5 font-semibold text-slate-900 hover:bg-slate-100">
+              <Button 
+                onClick={() => setIsAddLocationOpen(true)}
+                className="h-11 rounded-xl bg-white px-5 font-semibold text-slate-900 hover:bg-slate-100"
+              >
                 <Plus className="mr-2 h-4 w-4" />
                 Add Location
               </Button>
@@ -182,7 +199,7 @@ export default function ProtectedPage() {
               </div>
               <div className="rounded-2xl bg-white/10 px-4 py-3">
                 <p className="text-xs uppercase tracking-[0.14em] text-white/70">Locations connected</p>
-                <p className="mt-1 text-2xl font-semibold">0</p>
+                <p className="mt-1 text-2xl font-semibold">{locationsCount}</p>
               </div>
             </div>
           </div>
@@ -303,7 +320,7 @@ export default function ProtectedPage() {
                 <div className="space-y-3 p-6 sm:p-7">
                   {[
                     { title: "Pending replies", value: "0", icon: MessageSquare },
-                    { title: "Connected locations", value: "0", icon: MapPin },
+                    { title: "Connected locations", value: locationsCount.toString(), icon: MapPin },
                     { title: "Automation active", value: "No", icon: Zap },
                   ].map((item) => (
                     <div key={item.title} className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
@@ -357,6 +374,12 @@ export default function ProtectedPage() {
           </div>
         </>
       )}
+
+      <AddLocationDialog 
+        isOpen={isAddLocationOpen} 
+        onClose={() => setIsAddLocationOpen(false)}
+        onSuccess={handleLocationAdded}
+      />
     </div>
   );
 }

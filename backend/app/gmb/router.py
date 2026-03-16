@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime, timezone
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -21,6 +23,35 @@ from app.gmb.helper import (
 from app.core.supabase_gateway import SupabaseGateway
 
 router = APIRouter()
+
+# Simple in-memory cache
+# ACCOUNTS_CACHE format: {user_id: {"timestamp": float, "data": Any}}
+# LOCATIONS_CACHE format: {(user_id, account_name): {"timestamp": float, "data": Any}}
+ACCOUNTS_CACHE: Dict[str, Dict[str, Any]] = {}
+LOCATIONS_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+ACCOUNT_LOCKS: Dict[str, asyncio.Lock] = {}
+LOCATION_LOCKS: Dict[Tuple[str, str], asyncio.Lock] = {}
+ACCOUNT_RATE_LIMIT_UNTIL: Dict[str, float] = {}
+LOCATION_RATE_LIMIT_UNTIL: Dict[Tuple[str, str], float] = {}
+ACCOUNTS_CACHE_TTL = 900  # 15 minutes
+LOCATIONS_CACHE_TTL = 300  # 5 minutes
+GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS = 65
+
+
+def _get_account_lock(user_id: str) -> asyncio.Lock:
+    lock = ACCOUNT_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        ACCOUNT_LOCKS[user_id] = lock
+    return lock
+
+
+def _get_location_lock(cache_key: Tuple[str, str]) -> asyncio.Lock:
+    lock = LOCATION_LOCKS.get(cache_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        LOCATION_LOCKS[cache_key] = lock
+    return lock
 
 
 async def _get_access_token(
@@ -67,16 +98,67 @@ async def get_accounts(
     access_token: Annotated[str, Depends(get_bearer_token)],
 ) -> Dict[str, Any]:
     user = await supabase.get_user_from_access_token(access_token)
-    google_token = await _get_access_token(user.id, supabase, google_oauth)
+    now = time.time()
 
-    try:
-        accounts = await fetch_gmb_accounts(google_token)
-        return {"accounts": accounts}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        status_code = 401 if is_auth_error(exc) else 500
-        raise HTTPException(status_code=status_code, detail=get_error_message(exc))
+    # Fast-path cache check before lock.
+    if user.id in ACCOUNTS_CACHE:
+        cached = ACCOUNTS_CACHE[user.id]
+        if time.time() - cached["timestamp"] < ACCOUNTS_CACHE_TTL:
+            return {"accounts": cached["data"], "cached": True}
+
+    rate_limit_until = ACCOUNT_RATE_LIMIT_UNTIL.get(user.id, 0.0)
+    if now < rate_limit_until:
+        retry_in = max(1, int(rate_limit_until - now))
+        if user.id in ACCOUNTS_CACHE:
+            return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True}
+        raise HTTPException(
+            status_code=429,
+            detail=f"Google rate limit is active. Please retry in about {retry_in} seconds.",
+        )
+
+    lock = _get_account_lock(user.id)
+    async with lock:
+        now = time.time()
+
+        # Re-check inside the lock to dedupe concurrent requests.
+        if user.id in ACCOUNTS_CACHE:
+            cached = ACCOUNTS_CACHE[user.id]
+            if time.time() - cached["timestamp"] < ACCOUNTS_CACHE_TTL:
+                return {"accounts": cached["data"], "cached": True}
+
+        rate_limit_until = ACCOUNT_RATE_LIMIT_UNTIL.get(user.id, 0.0)
+        if now < rate_limit_until:
+            retry_in = max(1, int(rate_limit_until - now))
+            if user.id in ACCOUNTS_CACHE:
+                return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True}
+            raise HTTPException(
+                status_code=429,
+                detail=f"Google rate limit is active. Please retry in about {retry_in} seconds.",
+            )
+
+        google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+        try:
+            accounts = await fetch_gmb_accounts(google_token)
+            ACCOUNT_RATE_LIMIT_UNTIL.pop(user.id, None)
+            ACCOUNTS_CACHE[user.id] = {"timestamp": time.time(), "data": accounts}
+            return {"accounts": accounts}
+        except HTTPException as exc:
+            # If rate-limited but we have any cached data, serve it (even if stale).
+            if exc.status_code == 429 and user.id in ACCOUNTS_CACHE:
+                return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True}
+            if exc.status_code == 429:
+                ACCOUNT_RATE_LIMIT_UNTIL[user.id] = time.time() + GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS
+                raise HTTPException(
+                    status_code=429,
+                    detail="Google rate limit reached while fetching accounts. Please retry in about 1 minute.",
+                )
+            raise
+        except Exception as exc:
+            if user.id in ACCOUNTS_CACHE:
+                return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True}
+            status_code = 401 if is_auth_error(exc) else 500
+            raise HTTPException(status_code=status_code, detail=get_error_message(exc))
 
 
 @router.get("/locations")
@@ -90,27 +172,73 @@ async def get_locations(
         raise HTTPException(status_code=400, detail="accountName query parameter is required.")
 
     user = await supabase.get_user_from_access_token(access_token)
-    google_token = await _get_access_token(user.id, supabase, google_oauth)
+    now = time.time()
+    
+    cache_key = (user.id, account_name)
+    # Fast-path cache check before lock.
+    if cache_key in LOCATIONS_CACHE:
+        cached = LOCATIONS_CACHE[cache_key]
+        if time.time() - cached["timestamp"] < LOCATIONS_CACHE_TTL:
+            return {"locations": cached["data"], "cached": True}
 
-    try:
-        raw_locations = await fetch_gmb_locations(google_token, account_name)
-        formatted = [
-            {
-                "name": loc.get("name"),
-                "title": loc.get("title"),
-                "address": format_address(loc.get("storefrontAddress")),
-                "phone": loc.get("phoneNumbers", {}).get("primaryPhone", ""),
-                "website": loc.get("websiteUri", ""),
-                "category": loc.get("categories", {}).get("primaryCategory", {}).get("displayName", ""),
-            }
-            for loc in raw_locations
-        ]
-        return {"locations": formatted}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        status_code = 401 if is_auth_error(exc) else 500
-        raise HTTPException(status_code=status_code, detail=get_error_message(exc))
+    rate_limit_until = LOCATION_RATE_LIMIT_UNTIL.get(cache_key, 0.0)
+    if now < rate_limit_until:
+        retry_in = max(1, int(rate_limit_until - now))
+        if cache_key in LOCATIONS_CACHE:
+            return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True}
+        raise HTTPException(
+            status_code=429,
+            detail=f"Google rate limit is active. Please retry in about {retry_in} seconds.",
+        )
+
+    lock = _get_location_lock(cache_key)
+    async with lock:
+        now = time.time()
+
+        if cache_key in LOCATIONS_CACHE:
+            cached = LOCATIONS_CACHE[cache_key]
+            if time.time() - cached["timestamp"] < LOCATIONS_CACHE_TTL:
+                return {"locations": cached["data"], "cached": True}
+
+        rate_limit_until = LOCATION_RATE_LIMIT_UNTIL.get(cache_key, 0.0)
+        if now < rate_limit_until:
+            retry_in = max(1, int(rate_limit_until - now))
+            if cache_key in LOCATIONS_CACHE:
+                return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True}
+            raise HTTPException(
+                status_code=429,
+                detail=f"Google rate limit is active. Please retry in about {retry_in} seconds.",
+            )
+
+        google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+        try:
+            raw_locations = await fetch_gmb_locations(google_token, account_name)
+            LOCATION_RATE_LIMIT_UNTIL.pop(cache_key, None)
+            formatted = [
+                {
+                    "name": loc.get("name"),
+                    "title": loc.get("title"),
+                    "address": format_address(loc.get("storefrontAddress")),
+                    "phone": loc.get("phoneNumbers", {}).get("primaryPhone", ""),
+                    "website": loc.get("websiteUri", ""),
+                    "category": loc.get("categories", {}).get("primaryCategory", {}).get("displayName", ""),
+                }
+                for loc in raw_locations
+            ]
+            LOCATIONS_CACHE[cache_key] = {"timestamp": time.time(), "data": formatted}
+            return {"locations": formatted}
+        except HTTPException as exc:
+            if exc.status_code == 429 and cache_key in LOCATIONS_CACHE:
+                return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True}
+            if exc.status_code == 429:
+                LOCATION_RATE_LIMIT_UNTIL[cache_key] = time.time() + GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS
+            raise
+        except Exception as exc:
+            if cache_key in LOCATIONS_CACHE:
+                return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True}
+            status_code = 401 if is_auth_error(exc) else 500
+            raise HTTPException(status_code=status_code, detail=get_error_message(exc))
 
 
 @router.post("/locations/save")
@@ -123,6 +251,24 @@ async def save_location(
 
     try:
         existing = await supabase.get_location_by_gmb_location_id(user.id, body.locationId)
+        
+        # Check plan limits for new locations
+        if not existing:
+            sub = await supabase.get_user_subscription(user.id)
+            if sub:
+                max_locs = sub.get("max_locations", 1)
+                current_count = await supabase.count_user_locations(user.id)
+                if current_count >= max_locs:
+                    raise HTTPException(
+                        status_code=403,
+                        detail={
+                            "code": "PLAN_LIMIT_REACHED",
+                            "message": f"You have reached your limit of {max_locs} location(s). Please upgrade your plan to add more.",
+                            "limit": max_locs,
+                            "current": current_count
+                        }
+                    )
+
         location_data: Dict[str, Any] = {
             "user_id": user.id,
             "gmb_account_id": body.gmbAccountId,
