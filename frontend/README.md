@@ -13,6 +13,7 @@ Required environment variables:
 - `SUPABASE_SERVICE_ROLE_KEY` (server-only, required for secure refresh-token storage)
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
+- `NEXT_PUBLIC_GMB_BACKEND_URL` (optional, e.g. `http://localhost:8000`, preferred if Supabase Google provider is disabled)
 
 ## Auth Architecture Flow
 

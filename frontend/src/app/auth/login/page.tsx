@@ -1,4 +1,4 @@
-import { LoginForm } from "@/components/login-form";
+import { LoginForm } from "@/components/auth/login-form";
 import { AuthPageShell } from "@/components/marketing/auth-page-shell";
 import { Suspense } from "react";
 

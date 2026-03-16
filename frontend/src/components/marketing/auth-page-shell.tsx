@@ -3,7 +3,7 @@ import { CheckCircle2 } from "lucide-react";
 
 import { SiteFooter } from "@/components/marketing/site-footer";
 import { SiteHeader } from "@/components/marketing/site-header";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/shared/utils";
 
 type AuthPageShellProps = {
   title: string;

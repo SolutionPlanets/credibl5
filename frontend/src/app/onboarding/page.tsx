@@ -1,11 +1,15 @@
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/server";
+import { createClient } from "@/lib/supabase/server";
 import { NewUserOnboarding } from "@/components/onboarding/new-user-onboarding";
 
 type OnboardingPageProps = {
-  searchParams?: {
+  searchParams?:
+    | {
+        google?: string | string[];
+      }
+    | Promise<{
     google?: string | string[];
-  };
+      }>;
 };
 
 function getSingleQueryValue(value: string | string[] | undefined): string | undefined {
@@ -30,11 +34,12 @@ export default async function OnboardingPage({ searchParams }: OnboardingPagePro
     .eq("id", user.id)
     .maybeSingle();
 
-  const googleState = getSingleQueryValue(searchParams?.google);
+  const resolvedSearchParams = (await searchParams) ?? {};
+  const googleState = getSingleQueryValue(resolvedSearchParams.google);
   const isGoogleConnected = Boolean(profileData?.google_connected_at);
   const onboardingCompleted = Boolean(profileData?.onboarding_completed);
 
-  if (onboardingCompleted && googleState !== "connected") {
+  if ((onboardingCompleted || isGoogleConnected) && googleState !== "connected") {
     redirect("/protected");
   }
 

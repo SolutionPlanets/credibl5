@@ -1,7 +1,8 @@
 "use client";
 
-import { cn } from "@/lib/utils";
-import { createClient } from "@/lib/client";
+import { cn } from "@/lib/shared/utils";
+import { createClient } from "@/lib/supabase/client";
+import { getFriendlyAuthErrorMessage } from "@/lib/auth/auth-error-message";
 import { Button } from "@/components/ui/button";
 import { AlertCircle, Mail, Lock } from "lucide-react";
 import { useState, useEffect } from "react";
@@ -95,11 +96,7 @@ export function LoginForm({
 
       if (oauthError) throw oauthError;
     } catch (unknownError) {
-      setError(
-        unknownError instanceof Error
-          ? unknownError.message
-          : "Unable to sign in with Google"
-      );
+      setError(getFriendlyAuthErrorMessage(unknownError, "Unable to sign in with Google"));
       setIsGoogleLoading(false);
     }
   };

@@ -1,7 +1,7 @@
 "use client";
 
-import { cn } from "@/lib/utils";
-import { createClient } from "@/lib/client";
+import { cn } from "@/lib/shared/utils";
+import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { AlertCircle, CheckCircle2, Lock, Mail } from "lucide-react";
 import { useState } from "react";
@@ -46,20 +46,20 @@ export function SignupForm({
 
       if (signUpError) throw signUpError;
 
-      // Some Supabase projects require email verification before first session.
-      if (!data.session) {
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-
-        if (signInError) {
-          setInfo(
-            "Account created. Please verify your email, then sign in to continue."
-          );
-          return;
-        }
-      }
+      // Email verification temporarily disabled — skip confirmation step.
+      // if (!data.session) {
+      //   const { error: signInError } = await supabase.auth.signInWithPassword({
+      //     email,
+      //     password,
+      //   });
+      //
+      //   if (signInError) {
+      //     setInfo(
+      //       "Account created. Please verify your email, then sign in to continue."
+      //     );
+      //     return;
+      //   }
+      // }
 
       // Seed free subscription row for new password-based accounts.
       const bootstrapResponse = await fetch("/api/auth/ensure-subscription", {
@@ -70,27 +70,8 @@ export function SignupForm({
         throw new Error("Failed to initialize account subscription.");
       }
 
-      // One-time Google Business connection during onboarding.
-      const callbackUrl = new URL("/auth/callback", window.location.origin);
-      callbackUrl.searchParams.set("flow", "connect-google");
-      callbackUrl.searchParams.set("next", "/protected");
-
-      const { error: oauthError } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: {
-          scopes:
-            "https://www.googleapis.com/auth/business.manage https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
-          redirectTo: callbackUrl.toString(),
-          queryParams: {
-            access_type: "offline",
-            prompt: "consent",
-          },
-        },
-      });
-
-      if (oauthError) {
-        throw oauthError;
-      }
+      router.push("/onboarding");
+      router.refresh();
     } catch (unknownError) {
       setError(
         unknownError instanceof Error

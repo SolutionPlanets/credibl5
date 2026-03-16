@@ -20,7 +20,7 @@ import {
   Zap,
 } from "lucide-react";
 
-import { createClient } from "@/lib/client";
+import { createClient } from "@/lib/supabase/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { SiteFooter } from "@/components/marketing/site-footer";

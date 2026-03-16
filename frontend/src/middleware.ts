@@ -1,6 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-import { getAuthCookieDomain } from "@/lib/auth-cookie-domain";
+import { getAuthCookieDomain } from "@/lib/auth/auth-cookie-domain";
 
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });

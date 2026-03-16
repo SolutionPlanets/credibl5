@@ -1,7 +1,7 @@
-import { createAdminClient, createClient } from "@/lib/server";
+import { createAdminClient, createClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { createPlanDates, getStoredBillingCycle } from "@/lib/plan-config";
+import { createPlanDates, getStoredBillingCycle } from "@/lib/shared/plan-config";
 
 type CallbackFlow = "login" | "connect-google";
 

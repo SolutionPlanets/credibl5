@@ -1,7 +1,7 @@
 import React from "react";
 import { SiteHeader } from "@/components/marketing/site-header";
 import { SiteFooter } from "@/components/marketing/site-footer";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/shared/utils";
 
 type MarketingPageShellProps = {
     title: string;

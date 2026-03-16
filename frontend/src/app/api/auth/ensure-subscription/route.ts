@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/server";
-import { createPlanDates, getStoredBillingCycle } from "@/lib/plan-config";
+import { createClient } from "@/lib/supabase/server";
+import { createPlanDates, getStoredBillingCycle } from "@/lib/shared/plan-config";
 
 export async function POST() {
   try {

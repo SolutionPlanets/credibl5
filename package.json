@@ -1,16 +1,22 @@
 {
-  "name": "cradible5",
+  "name": "reply-pulse-mvp",
   "version": "1.0.0",
+  "workspaces": [
+    "frontend"
+  ],
   "description": "Root package to manage full-stack development",
   "scripts": {
-    "dev": "npm run dev --prefix frontend",
-    "frontend": "npm run dev --prefix frontend",
-    "build": "npm run build --prefix frontend",
-    "install": "npm install --prefix frontend"
+    "dev": "concurrently --kill-others -n \"backend,frontend\" -c \"yellow,blue\" \"npm run backend\" \"npm run frontend\"",
+    "backend": "cd backend & .\\venv\\Scripts\\python.exe main.py",
+    "frontend": "cd frontend & npm run dev",
+    "build": "cd frontend & npm run build",
+    "frontend-install": "cd frontend & npm install"
   },
   "devDependencies": {
-    "@supabase/ssr": "^0.9.0",
-    "@supabase/supabase-js": "^2.99.0"
+    "@tailwindcss/postcss": "^4.2.1",
+    "concurrently": "^8.0.0",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.1"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.98.0",

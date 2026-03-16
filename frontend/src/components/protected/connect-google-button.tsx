@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { createClient } from "@/lib/client";
+import { createClient } from "@/lib/supabase/client";
+import { getFriendlyAuthErrorMessage } from "@/lib/auth/auth-error-message";
 import { Button } from "@/components/ui/button";
+import { startGoogleConnectFlow } from "@/lib/gmb/google-connect";
 
 export function ConnectGoogleButton() {
   const [error, setError] = useState<string | null>(null);
@@ -14,30 +16,13 @@ export function ConnectGoogleButton() {
 
     try {
       const supabase = createClient();
-      const callbackUrl = new URL("/auth/callback", window.location.origin);
-      callbackUrl.searchParams.set("flow", "connect-google");
-      callbackUrl.searchParams.set("next", "/protected");
-
-      const { error: oauthError } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: {
-          scopes:
-            "https://www.googleapis.com/auth/business.manage https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
-          redirectTo: callbackUrl.toString(),
-          queryParams: {
-            access_type: "offline",
-            prompt: "consent",
-          },
-        },
+      await startGoogleConnectFlow({
+        supabase,
+        nextPath: "/protected",
+        flow: "connect-google",
       });
-
-      if (oauthError) throw oauthError;
     } catch (unknownError) {
-      setError(
-        unknownError instanceof Error
-          ? unknownError.message
-          : "Unable to start Google connection flow"
-      );
+      setError(getFriendlyAuthErrorMessage(unknownError, "Unable to start Google connection flow"));
       setIsLoading(false);
     }
   };

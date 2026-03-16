@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Menu, Sparkles } from "lucide-react";
 import { useState, useEffect } from "react";
 import { Button } from "../ui/button";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/shared/utils";
 import {
   Dialog,
   DialogContent,

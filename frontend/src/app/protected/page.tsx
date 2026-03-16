@@ -1,11 +1,16 @@
-import { createClient } from "@/lib/server";
+import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { ConnectGoogleButton } from "@/components/protected/connect-google-button";
+import { GMBStatusAlert } from "@/components/protected/gmb-status-alert";
 
 type ProtectedPageProps = {
-  searchParams?: {
-    google?: string | string[];
-  };
+  searchParams?:
+    | {
+        google?: string | string[];
+      }
+    | Promise<{
+        google?: string | string[];
+      }>;
 };
 
 function getSingleQueryValue(value: string | string[] | undefined): string | undefined {
@@ -27,13 +32,19 @@ export default async function ProtectedPage({ searchParams }: ProtectedPageProps
   const displayName = user.user_metadata?.full_name || user.email || "User";
   const { data: profileData } = await supabase
     .from("user_profiles")
-    .select("google_connected_at")
+    .select("google_connected_at, onboarding_completed")
     .eq("id", user.id)
     .maybeSingle();
   const isGoogleConnected =
     Boolean(profileData?.google_connected_at) ||
     user.user_metadata?.google_connected === true;
-  const googleState = getSingleQueryValue(searchParams?.google);
+  const onboardingCompleted = Boolean(profileData?.onboarding_completed);
+  const resolvedSearchParams = (await searchParams) ?? {};
+  const googleState = getSingleQueryValue(resolvedSearchParams.google);
+
+  if (!onboardingCompleted && !isGoogleConnected) {
+    redirect("/onboarding");
+  }
 
   return (
     <div className="space-y-6">
@@ -41,6 +52,8 @@ export default async function ProtectedPage({ searchParams }: ProtectedPageProps
         <h1 className="text-2xl font-bold text-reply-navy">Welcome, {displayName}</h1>
         <p className="text-slate-500 mt-1">Your dashboard is ready.</p>
       </div>
+
+      <GMBStatusAlert />
 
       {googleState === "connected" && (
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
