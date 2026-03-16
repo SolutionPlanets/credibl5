@@ -7,11 +7,11 @@ from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
-from ..core.deps import get_app_settings, get_bearer_token, get_google_oauth, get_supabase_gateway
-from ..gmb.oauth import GoogleOAuthService
-from ..core.settings import Settings
-from ..core.supabase_gateway import SupabaseGateway
-from ..core.state_token import StateTokenError, sign_state, verify_state
+from app.core.deps import get_app_settings, get_bearer_token, get_google_oauth, get_supabase_gateway
+from app.gmb.oauth import GoogleOAuthService
+from app.core.settings import Settings
+from app.core.supabase_gateway import SupabaseGateway
+from app.core.state_token import StateTokenError, sign_state, verify_state
 
 router = APIRouter()
 

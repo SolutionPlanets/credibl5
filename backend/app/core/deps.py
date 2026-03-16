@@ -4,9 +4,9 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException
 
-from ..gmb.oauth import GoogleOAuthService
-from .settings import Settings, get_settings
-from .supabase_gateway import SupabaseGateway
+from app.gmb.oauth import GoogleOAuthService
+from app.core.settings import Settings, get_settings
+from app.core.supabase_gateway import SupabaseGateway
 
 
 def get_app_settings() -> Settings:

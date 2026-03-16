@@ -59,12 +59,29 @@ export function LoginForm({
 
       router.push("/protected");
       router.refresh();
-    } catch (unknownError) {
-      setError(
-        unknownError instanceof Error
-          ? unknownError.message
-          : "Unable to sign in with email/password"
-      );
+    } catch (unknownError: any) {
+      const errorMessage = unknownError instanceof Error ? unknownError.message : "Unable to sign in";
+      
+      setError(errorMessage);
+
+      // Special handling for "Invalid login credentials" - check if they signed up with Google
+      if (errorMessage.toLowerCase().includes("invalid login credentials")) {
+        try {
+          const { data: profile } = await supabase
+            .from("user_profiles")
+            .select("has_password")
+            .eq("email", email)
+            .maybeSingle();
+
+          if (profile && profile.has_password === false) {
+            // User exists but has no password (likely signed up via Google)
+            router.push(`/auth/create-password?email=${encodeURIComponent(email)}&notice=${encodeURIComponent("It looks like you usually sign in with Google. Please create a password first to login with your email address.")}`);
+            return;
+          }
+        } catch (checkError) {
+          console.error("Error checking user profile:", checkError);
+        }
+      }
     } finally {
       setIsPasswordLoading(false);
     }
@@ -223,6 +240,15 @@ export function LoginForm({
             >
               {isPasswordLoading ? "Signing in..." : "Sign in"}
             </Button>
+            
+            <div className="text-right">
+              <Link
+                href={`/auth/create-password?email=${encodeURIComponent(email)}`}
+                className="text-xs font-semibold text-reply-purple hover:underline"
+              >
+                Forgot or need to create a password?
+              </Link>
+            </div>
           </form>
 
           <div className="relative">

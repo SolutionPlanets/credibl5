@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Set
 import httpx
 from fastapi import HTTPException
 
-from .settings import Settings
+from app.core.settings import Settings
 
 
 @dataclass

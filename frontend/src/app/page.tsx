@@ -227,7 +227,7 @@ export default function Home() {
               </h1>
 
               <p className="mt-6 max-w-xl text-lg leading-relaxed text-slate-600 md:text-xl">
-                Reply Pulse helps teams write faster, more consistent customer
+                Credibl5 helps teams write faster, more consistent customer
                 responses so your brand sounds sharp in every market.
               </p>
 
@@ -441,7 +441,7 @@ export default function Home() {
                 A cleaner workflow for customer-facing teams
               </h2>
               <p className="mt-5 text-lg leading-relaxed text-slate-600">
-                Reply Pulse streamlines your review response process with
+                Credibl5 streamlines your review response process with
                 AI-powered drafts, brand voice consistency, and multi-location
                 management in one clean interface.
               </p>
@@ -699,7 +699,7 @@ export default function Home() {
                 Start managing reviews smarter today
               </h2>
               <p className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-slate-600">
-                Reply Pulse keeps your brand consistent, your team fast, and your
+                Credibl5 keeps your brand consistent, your team fast, and your
                 customers heard. No credit card required to start.
               </p>
               <div className="mt-10 flex flex-col justify-center gap-4 sm:flex-row">

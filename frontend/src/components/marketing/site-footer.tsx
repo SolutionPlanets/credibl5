@@ -46,7 +46,7 @@ export function SiteFooter() {
           <div className="lg:col-span-2">
             <Link href="/" className="inline-flex items-center gap-3">
               <span className="text-2xl font-extrabold tracking-tight text-slate-900">
-                Reply Pulse
+                Credibl5
               </span>
             </Link>
 
@@ -97,7 +97,7 @@ export function SiteFooter() {
         </div>
 
         <div className="mt-14 flex flex-col items-start justify-between gap-4 border-t border-slate-200/70 pt-6 text-sm text-slate-500 sm:flex-row sm:items-center">
-          <p>&copy; {new Date().getFullYear()} Reply Pulse. All rights reserved.</p>
+          <p>&copy; {new Date().getFullYear()} Credibl5. All rights reserved.</p>
           <p className="inline-flex items-center gap-2 font-medium text-slate-600">
             <span className="h-2 w-2 rounded-full bg-emerald-500" />
             Systems operational

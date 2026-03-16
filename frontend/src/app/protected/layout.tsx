@@ -27,7 +27,7 @@ export default async function ProtectedLayout({
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/80 backdrop-blur-md">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 md:px-8">
           <Link href="/protected" className="text-lg font-bold text-reply-navy">
-            Reply Pulse
+            Credibl5
           </Link>
 
           <div className="flex items-center gap-4">

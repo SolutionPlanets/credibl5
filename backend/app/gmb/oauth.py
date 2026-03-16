@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import HTTPException
 
-from ..core.settings import Settings
+from app.core.settings import Settings
 
 
 class GoogleOAuthService:

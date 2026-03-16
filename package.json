@@ -6,6 +6,7 @@
   ],
   "description": "Root package to manage full-stack development",
   "scripts": {
+    "predev": "powershell -Command \"Get-NetTCPConnection -LocalPort 3000,8000 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; if (Test-Path frontend/.next/dev/lock) { Remove-Item frontend/.next/dev/lock -Force }\"",
     "dev": "concurrently --kill-others -n \"backend,frontend\" -c \"yellow,blue\" \"npm run backend\" \"npm run frontend\"",
     "backend": "cd backend & .\\venv\\Scripts\\python.exe main.py",
     "frontend": "cd frontend & npm run dev",

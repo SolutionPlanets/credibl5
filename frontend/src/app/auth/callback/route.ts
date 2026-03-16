@@ -116,7 +116,6 @@ async function markGoogleConnected(
       email,
       google_connected_at: profileData?.google_connected_at || nowIso,
       google_last_oauth_at: nowIso,
-      onboarding_completed: true,
     },
     { onConflict: "id" }
   );
@@ -198,6 +197,25 @@ export async function GET(request: NextRequest) {
       // Login should still succeed even if token persistence fails.
       console.error("Unable to persist Google refresh token on login:", saveError);
     }
+  }
+
+  // Check if they need onboarding or can go to dashboard
+  try {
+    const adminClient = await createAdminClient();
+    const [hasConnection, { data: profile }] = await Promise.all([
+      hasStoredGoogleConnection(adminClient, userId),
+      adminClient
+        .from(PROFILES_TABLE)
+        .select("onboarding_completed")
+        .eq("id", userId)
+        .maybeSingle(),
+    ]);
+
+    if (hasConnection && profile?.onboarding_completed) {
+      return NextResponse.redirect(`${origin}/protected`);
+    }
+  } catch (error) {
+    console.error("Error checking onboarding/connection status:", error);
   }
 
   return NextResponse.redirect(`${origin}${next}`);

@@ -6,9 +6,9 @@ from typing import Annotated, Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from ..core.deps import get_bearer_token, get_google_oauth, get_supabase_gateway
-from .oauth import GoogleOAuthService
-from .helper import (
+from app.core.deps import get_bearer_token, get_google_oauth, get_supabase_gateway
+from app.gmb.oauth import GoogleOAuthService
+from app.gmb.helper import (
     convert_star_rating,
     fetch_gmb_accounts,
     fetch_gmb_locations,
@@ -18,7 +18,7 @@ from .helper import (
     get_sentiment,
     is_auth_error,
 )
-from ..core.supabase_gateway import SupabaseGateway
+from app.core.supabase_gateway import SupabaseGateway
 
 router = APIRouter()
 
