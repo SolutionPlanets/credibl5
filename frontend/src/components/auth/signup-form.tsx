@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { AlertCircle, CheckCircle2, Lock, Mail } from "lucide-react";
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { getFriendlyAuthErrorMessage } from "@/lib/auth/auth-error-message";
 
 export function SignupForm({
@@ -14,6 +14,9 @@ export function SignupForm({
   ...props
 }: React.ComponentPropsWithoutRef<"div">) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const planParam = searchParams.get("plan");
+  const billingParam = searchParams.get("billing");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -48,20 +51,18 @@ export function SignupForm({
 
       if (signUpError) throw signUpError;
 
-      // Email verification temporarily disabled — skip confirmation step.
-      // if (!data.session) {
-      //   const { error: signInError } = await supabase.auth.signInWithPassword({
-      //     email,
-      //     password,
-      //   });
-      //
-      //   if (signInError) {
-      //     setInfo(
-      //       "Account created. Please verify your email, then sign in to continue."
-      //     );
-      //     return;
-      //   }
-      // }
+      // Seed free subscription row for new password-based accounts.
+      // If signUp didn't return a session (e.g. if auto-login is not immediate), 
+      // try to get it or sign in to ensure cookies are set for the following fetch.
+      let session = data.session;
+      if (!session) {
+        const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (signInError) throw signInError;
+        session = signInData.session;
+      }
 
       // Seed free subscription row for new password-based accounts.
       const bootstrapResponse = await fetch("/api/auth/ensure-subscription", {
@@ -72,7 +73,10 @@ export function SignupForm({
         throw new Error("Failed to initialize account subscription.");
       }
 
-      router.push("/onboarding");
+      const onboardingUrl = new URL("/onboarding", window.location.origin);
+      if (planParam) onboardingUrl.searchParams.set("plan", planParam);
+      if (billingParam) onboardingUrl.searchParams.set("billing", billingParam);
+      router.push(onboardingUrl.pathname + onboardingUrl.search);
       router.refresh();
     } catch (unknownError) {
       setError(
@@ -94,8 +98,12 @@ export function SignupForm({
     setInfo(null);
 
     try {
+      const onboardingPath = new URL("/onboarding", window.location.origin);
+      if (planParam) onboardingPath.searchParams.set("plan", planParam);
+      if (billingParam) onboardingPath.searchParams.set("billing", billingParam);
+
       const callbackUrl = new URL("/auth/callback", window.location.origin);
-      callbackUrl.searchParams.set("next", "/onboarding");
+      callbackUrl.searchParams.set("next", onboardingPath.pathname + onboardingPath.search);
 
       const { error: oauthError } = await supabase.auth.signInWithOAuth({
         provider: "google",

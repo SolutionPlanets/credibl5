@@ -6,6 +6,9 @@ new_user_onboarding_pages_refference/
 /new_user_onboarding_pages_refference/*
 supabase/
 /supabase/*
+!/frontend/supabase/
+!/frontend/supabase/migrations/
+!/frontend/supabase/migrations/*.sql
 .env/
 .env*
 __pycache__/
@@ -25,3 +28,6 @@ sql_referrence/
 /reference/
 reference/*
 /reference
+
+# Prevent accidental commits of raw SQL row exports that may contain secrets/PII.
+*_rows.sql

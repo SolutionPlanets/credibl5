@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient, createClient } from "@/lib/supabase/server";
 import { createPlanDates, getStoredBillingCycle } from "@/lib/shared/plan-config";
 
 export async function POST() {
   try {
     const supabase = await createClient();
+    const adminClient = await createAdminClient();
     const {
       data: { user },
       error: userError,
@@ -14,7 +15,7 @@ export async function POST() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    await supabase.from("user_profiles").upsert(
+    await adminClient.from("user_profiles").upsert(
       {
         id: user.id,
         email: user.email ?? null,
@@ -22,7 +23,7 @@ export async function POST() {
       { onConflict: "id" }
     );
 
-    const { data: existingSubscription, error: lookupError } = await supabase
+    const { data: existingSubscription, error: lookupError } = await adminClient
       .from("subscription_plans")
       .select("user_id")
       .eq("user_id", user.id)
@@ -41,13 +42,15 @@ export async function POST() {
 
     const { startDate, endDate } = createPlanDates("free", "monthly");
 
-    const { error: insertError } = await supabase.from("subscription_plans").insert({
+    const { error: insertError } = await adminClient.from("subscription_plans").insert({
       user_id: user.id,
-      email: user.email,
+      email: user.email ?? null,
       plan_type: "free",
       max_locations: 1,
       billing_cycle: getStoredBillingCycle("free", "monthly"),
       status: "trial",
+      amount_paid_cents: 0,
+      payment_currency: "USD",
       current_period_start: startDate.toISOString(),
       current_period_end: endDate.toISOString(),
     });

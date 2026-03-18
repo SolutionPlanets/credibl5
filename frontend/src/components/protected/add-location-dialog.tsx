@@ -78,6 +78,10 @@ const toErrorMessage = (error: unknown) => {
   if (error instanceof Error) {
     return error.message;
   }
+  if (typeof error === 'string') return error;
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    return (error as any).message;
+  }
   return "Something went wrong. Please try again.";
 };
 
@@ -146,10 +150,18 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData?.detail || "Failed to fetch accounts");
+          const detail = errorData?.detail;
+          if (typeof detail === 'object' && detail !== null) {
+            throw detail; // Throw the error object directly
+          }
+          throw new Error(detail || "Failed to fetch accounts");
         }
 
         const data = await response.json();
+        // If the backend sent a stale/rate-limited response
+        if (data.rate_limited && data.message) {
+          setError(data.message);
+        }
         return (data.accounts || []) as GMBAccount[];
       })();
 
@@ -184,6 +196,11 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
       }
       setLoading(false);
     }
+  };
+
+  const handleReconnectGoogle = () => {
+    // Redirect to backend OAuth flow
+    window.location.href = `${process.env.NEXT_PUBLIC_GMB_BACKEND_URL}/auth/google/login?next=${encodeURIComponent(window.location.pathname)}`;
   };
 
   const fetchLocations = async (accountName: string) => {
@@ -234,10 +251,17 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData?.detail || "Failed to fetch locations");
+          const detail = errorData?.detail;
+          if (typeof detail === 'object' && detail !== null) {
+            throw detail;
+          }
+          throw new Error(detail || "Failed to fetch locations");
         }
 
         const data = await response.json();
+        if (data.rate_limited && data.message) {
+          setError(data.message);
+        }
         return (data.locations || []) as GMBLocation[];
       })();
 
@@ -339,10 +363,38 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
 
         <div className="py-6">
           {error && (
-            <Alert variant="destructive" className="mb-6 rounded-2xl">
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Error</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
+            <Alert variant="destructive" className="mb-6 rounded-2xl flex flex-col items-start gap-1">
+              <div className="flex gap-3 items-center">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <AlertTitle>Error</AlertTitle>
+              </div>
+              <AlertDescription className="mt-1 ml-7">
+                {error}
+                {(typeof error === 'string' && (error.includes('Google connection') || error.includes('reconnect'))) && (
+                  <div className="mt-3">
+                    <Button 
+                      size="sm" 
+                      variant="outline" 
+                      onClick={handleReconnectGoogle}
+                      className="bg-white/10 border-red-200 hover:bg-white/20 text-red-900 rounded-xl font-bold"
+                    >
+                      Reconnect Google Account
+                    </Button>
+                  </div>
+                )}
+                {(typeof error === 'string' && (error.includes('authenticated') || error.includes('Supabase session') || error.includes('access token'))) && (
+                  <div className="mt-3">
+                    <Button 
+                      size="sm" 
+                      variant="outline" 
+                      onClick={() => window.location.href = '/auth/login'}
+                      className="bg-white/10 border-red-200 hover:bg-white/20 text-red-900 rounded-xl font-bold"
+                    >
+                      Return to Login
+                    </Button>
+                  </div>
+                )}
+              </AlertDescription>
             </Alert>
           )}
 

@@ -30,11 +30,11 @@ async function ensureUserProfileRow(
 }
 
 async function ensureSubscriptionRow(
-  supabase: Awaited<ReturnType<typeof createClient>>,
+  adminClient: Awaited<ReturnType<typeof createAdminClient>>,
   userId: string,
   email: string | null
 ) {
-  const { data: existingSubscription, error: lookupError } = await supabase
+  const { data: existingSubscription, error: lookupError } = await adminClient
     .from("subscription_plans")
     .select("user_id")
     .eq("user_id", userId)
@@ -44,13 +44,15 @@ async function ensureSubscriptionRow(
 
   const { startDate, endDate } = createPlanDates("free", "monthly");
 
-  await supabase.from("subscription_plans").insert({
+  await adminClient.from("subscription_plans").insert({
     user_id: userId,
     email,
     plan_type: "free",
     max_locations: 1,
     billing_cycle: getStoredBillingCycle("free", "monthly"),
     status: "trial",
+    amount_paid_cents: 0,
+    payment_currency: "USD",
     current_period_start: startDate.toISOString(),
     current_period_end: endDate.toISOString(),
   });
@@ -161,15 +163,15 @@ export async function GET(request: NextRequest) {
 
   const userId = data.session.user.id;
   const userEmail = data.session.user.email ?? null;
+  const adminClient = await createAdminClient();
 
   await ensureUserProfileRow(supabase, userId, userEmail);
-  await ensureSubscriptionRow(supabase, userId, userEmail);
+  await ensureSubscriptionRow(adminClient, userId, userEmail);
 
   const providerRefreshToken = data.session.provider_refresh_token;
 
   if (flow === "connect-google") {
     try {
-      const adminClient = await createAdminClient();
       const hasExistingConnection = await hasStoredGoogleConnection(adminClient, userId);
 
       if (!providerRefreshToken && !hasExistingConnection) {
@@ -190,7 +192,6 @@ export async function GET(request: NextRequest) {
 
   if (providerRefreshToken) {
     try {
-      const adminClient = await createAdminClient();
       await upsertGoogleRefreshToken(adminClient, userId, providerRefreshToken);
       await markGoogleConnected(adminClient, userId, userEmail);
     } catch (saveError) {
@@ -201,7 +202,6 @@ export async function GET(request: NextRequest) {
 
   // Check if they need onboarding or can go to dashboard
   try {
-    const adminClient = await createAdminClient();
     const [hasConnection, { data: profile }] = await Promise.all([
       hasStoredGoogleConnection(adminClient, userId),
       adminClient

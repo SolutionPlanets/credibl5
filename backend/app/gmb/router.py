@@ -146,19 +146,37 @@ async def get_accounts(
         except HTTPException as exc:
             # If rate-limited but we have any cached data, serve it (even if stale).
             if exc.status_code == 429 and user.id in ACCOUNTS_CACHE:
-                return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True}
+                return {
+                    "accounts": ACCOUNTS_CACHE[user.id]["data"], 
+                    "cached": True, 
+                    "stale": True, 
+                    "rate_limited": True,
+                    "message": "Google rate limit reached. Showing your cached accounts. Please retry in about 1 minute."
+                }
             if exc.status_code == 429:
                 ACCOUNT_RATE_LIMIT_UNTIL[user.id] = time.time() + GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS
-                raise HTTPException(
-                    status_code=429,
-                    detail="Google rate limit reached while fetching accounts. Please retry in about 1 minute.",
-                )
+                raise
             raise
         except Exception as exc:
             if user.id in ACCOUNTS_CACHE:
-                return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True}
+                return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True, "stale": True}
+            
+            # Re-raise with descriptive error message if it's already an HTTPException
+            if isinstance(exc, HTTPException):
+                raise
+            
             status_code = 401 if is_auth_error(exc) else 500
-            raise HTTPException(status_code=status_code, detail=get_error_message(exc))
+            detail = get_error_message(exc)
+            
+            # Specifically handle GMB auth errors
+            if "google" in detail.lower() or "token" in detail.lower():
+                detail = {
+                    "code": "GOOGLE_AUTH_ERROR",
+                    "message": f"Google connection error: {detail}. Please reconnect your account.",
+                    "original_error": detail
+                }
+
+            raise HTTPException(status_code=status_code, detail=detail)
 
 
 @router.get("/locations")
@@ -230,15 +248,35 @@ async def get_locations(
             return {"locations": formatted}
         except HTTPException as exc:
             if exc.status_code == 429 and cache_key in LOCATIONS_CACHE:
-                return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True}
+                return {
+                    "locations": LOCATIONS_CACHE[cache_key]["data"], 
+                    "cached": True, 
+                    "stale": True,
+                    "rate_limited": True,
+                    "message": "Google rate limit reached. Showing your cached locations. Please retry in about 1 minute."
+                }
             if exc.status_code == 429:
                 LOCATION_RATE_LIMIT_UNTIL[cache_key] = time.time() + GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS
+                raise
             raise
         except Exception as exc:
             if cache_key in LOCATIONS_CACHE:
-                return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True}
+                return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True, "stale": True}
+            
+            if isinstance(exc, HTTPException):
+                raise
+
             status_code = 401 if is_auth_error(exc) else 500
-            raise HTTPException(status_code=status_code, detail=get_error_message(exc))
+            detail = get_error_message(exc)
+
+            if "google" in detail.lower() or "token" in detail.lower():
+                detail = {
+                    "code": "GOOGLE_AUTH_ERROR",
+                    "message": f"Google connection error: {detail}. Please reconnect your account.",
+                    "original_error": detail
+                }
+
+            raise HTTPException(status_code=status_code, detail=detail)
 
 
 @router.post("/locations/save")

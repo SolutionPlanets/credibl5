@@ -9,8 +9,10 @@ import { StepCompanyInfo } from "@/components/onboarding/steps/step-company-info
 import { StepConnect } from "@/components/onboarding/steps/step-connect";
 import { StepGoals } from "@/components/onboarding/steps/step-goals";
 import { StepSource } from "@/components/onboarding/steps/step-source";
+import { StepChoosePlan } from "@/components/onboarding/steps/step-choose-plan";
 import { Button } from "@/components/ui/button";
 import type { OnboardingDraft } from "@/components/onboarding/types";
+import type { BillingCycle, PlanId } from "@/lib/shared/plan-config";
 import { getFriendlyAuthErrorMessage } from "@/lib/auth/auth-error-message";
 import { createClient } from "@/lib/supabase/client";
 import { startGoogleConnectFlow } from "@/lib/gmb/google-connect";
@@ -20,6 +22,8 @@ type NewUserOnboardingProps = {
   initialEmail: string | null;
   initialGoogleConnected: boolean;
   googleState?: string;
+  preselectedPlan?: PlanId;
+  preselectedBilling?: BillingCycle;
 };
 
 const STORAGE_KEY = "cradible5.new-user-onboarding";
@@ -40,9 +44,11 @@ export function NewUserOnboarding({
   initialEmail,
   initialGoogleConnected,
   googleState,
+  preselectedPlan,
+  preselectedBilling,
 }: NewUserOnboardingProps) {
   const router = useRouter();
-  const [activeStep, setActiveStep] = useState(initialGoogleConnected ? 4 : 1);
+  const [activeStep, setActiveStep] = useState(initialGoogleConnected ? 5 : 1);
   const [draft, setDraft] = useState<OnboardingDraft>(DEFAULT_DRAFT);
   const [isLoaded, setIsLoaded] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
@@ -61,9 +67,20 @@ export function NewUserOnboarding({
 
   useEffect(() => {
     if (initialGoogleConnected) {
-      setActiveStep(4);
+      setActiveStep(5);
     }
   }, [initialGoogleConnected]);
+
+  // Pre-select plan from URL params
+  useEffect(() => {
+    if (preselectedPlan && preselectedPlan !== "free") {
+      setDraft((prev) => ({
+        ...prev,
+        selectedPlan: preselectedPlan,
+        billingCycle: preselectedBilling || "monthly",
+      }));
+    }
+  }, [preselectedPlan, preselectedBilling]);
 
   useEffect(() => {
     try {
@@ -127,6 +144,18 @@ export function NewUserOnboarding({
     if (activeStep === 3 && draft.source === "other" && !draft.sourceOtherText.trim()) {
       setStepError("Please provide a short note for Other, or choose another source.");
       return;
+    }
+
+    // Step 4: Plan selection validation
+    if (activeStep === 4) {
+      if (draft.selectedPlan === "agency") {
+        router.push("/contact");
+        return;
+      }
+      if (draft.selectedPlan !== "free" && !draft.paymentCompleted) {
+        setStepError("Please complete payment for the selected plan.");
+        return;
+      }
     }
 
     setActiveStep((prev) => Math.min(prev + 1, TOTAL_STEPS));
@@ -209,6 +238,36 @@ export function NewUserOnboarding({
           )}
 
           {activeStep === 4 && (
+            <StepChoosePlan
+              selectedPlan={draft.selectedPlan}
+              billingCycle={draft.billingCycle}
+              paymentCompleted={draft.paymentCompleted}
+              paidAmountCents={draft.paidAmountCents}
+              onPlanSelect={(planId) => {
+                setStepError(null);
+                setDraft((prev) => {
+                  if (prev.selectedPlan === planId) {
+                    return prev;
+                  }
+
+                  return {
+                    ...prev,
+                    selectedPlan: planId,
+                    paymentCompleted: false,
+                    paidAmountCents: null,
+                  };
+                });
+              }}
+              onBillingCycleChange={(cycle) => updateDraft("billingCycle", cycle)}
+              onPaymentComplete={(amountPaidCents) => {
+                updateDraft("paymentCompleted", true);
+                updateDraft("paidAmountCents", amountPaidCents);
+                setActiveStep(5);
+              }}
+            />
+          )}
+
+          {activeStep === 5 && (
             <StepConnect
               email={initialEmail}
               isGoogleConnected={isGoogleConnected}
@@ -225,6 +284,7 @@ export function NewUserOnboarding({
             </p>
           )}
 
+          {/* Navigation for steps 1-3 (standard flow) */}
           {activeStep < 4 && (
             <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
@@ -260,7 +320,32 @@ export function NewUserOnboarding({
             </div>
           )}
 
+          {/* Navigation for step 4 (Choose Plan) — Back + Continue */}
           {activeStep === 4 && (
+            <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 rounded-xl border-slate-300 px-4 text-reply-navy hover:bg-slate-100"
+                onClick={handleBack}
+              >
+                <ArrowLeft className="h-4 w-4" />
+                Back
+              </Button>
+
+              <Button
+                type="button"
+                className="h-11 rounded-xl bg-reply-navy px-5 text-white hover:bg-reply-navy/90"
+                onClick={handleContinue}
+              >
+                {draft.selectedPlan === "free" ? "Continue with Free" : "Continue"}
+                <ArrowRight className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
+
+          {/* Navigation for step 5 (Connect Google) — Back only */}
+          {activeStep === 5 && (
             <div className="mt-8 flex items-center justify-start">
               <Button
                 type="button"

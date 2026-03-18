@@ -112,7 +112,7 @@ class SupabaseGateway:
         url = f"{self.settings.supabase_url}/rest/v1/subscription_plans"
         headers = self._service_headers()
         params = {
-            "select": "id,plan_type,max_locations,status",
+            "select": "id,plan_type,max_locations,status,billing_cycle,current_period_start,current_period_end,amount_paid_cents,payment_currency",
             "user_id": f"eq.{user_id}",
             "limit": "1",
         }
@@ -122,6 +122,57 @@ class SupabaseGateway:
             raise HTTPException(status_code=500, detail=self._postgrest_error(response))
         data = response.json()
         return data[0] if data else None
+
+    async def upsert_subscription(self, user_id: str, plan_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create or update the user's subscription plan."""
+        url = f"{self.settings.supabase_url}/rest/v1/subscription_plans"
+        headers = self._service_headers(
+            {
+                "Prefer": "resolution=merge-duplicates,return=representation",
+                "Content-Type": "application/json",
+            }
+        )
+        params = {"on_conflict": "user_id"}
+        payload = [{"user_id": user_id, **plan_data}]
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, headers=headers, params=params, json=payload)
+            if response.status_code < 400:
+                data = response.json()
+                return data[0] if data else payload[0]
+
+            # Backward compatibility fallback: older databases may be missing
+            # a unique constraint/index on user_id, which breaks ON CONFLICT.
+            if not self._is_on_conflict_constraint_error(response):
+                raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+
+            patch_headers = self._service_headers(
+                {
+                    "Prefer": "return=representation",
+                    "Content-Type": "application/json",
+                }
+            )
+            patch_params = {"user_id": f"eq.{user_id}"}
+            patch_response = await client.patch(
+                url,
+                headers=patch_headers,
+                params=patch_params,
+                json=plan_data,
+            )
+            if patch_response.status_code >= 400:
+                raise HTTPException(status_code=500, detail=self._postgrest_error(patch_response))
+
+            patched_rows = patch_response.json()
+            if patched_rows:
+                return patched_rows[0]
+
+            insert_payload = [{"user_id": user_id, **plan_data}]
+            insert_response = await client.post(url, headers=patch_headers, json=insert_payload)
+            if insert_response.status_code >= 400:
+                raise HTTPException(status_code=500, detail=self._postgrest_error(insert_response))
+
+            inserted_rows = insert_response.json()
+            return inserted_rows[0] if inserted_rows else insert_payload[0]
 
     async def count_user_locations(self, user_id: str) -> int:
         url = f"{self.settings.supabase_url}/rest/v1/locations"
@@ -251,6 +302,27 @@ class SupabaseGateway:
         if extra:
             headers.update(extra)
         return headers
+
+    @staticmethod
+    def _is_on_conflict_constraint_error(response: httpx.Response) -> bool:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+
+        code = str(payload.get("code", "")).upper()
+        message = " ".join(
+            str(payload.get(key, "")) for key in ("message", "details", "hint")
+        ).lower()
+        response_text = response.text.lower()
+
+        return (
+            code == "42P10"
+            or "no unique or exclusion constraint matching the on conflict specification"
+            in message
+            or "no unique or exclusion constraint matching the on conflict specification"
+            in response_text
+        )
 
     @staticmethod
     def _postgrest_error(response: httpx.Response) -> str:

@@ -12,6 +12,7 @@ from app.core.deps import get_app_settings, get_bearer_token, get_google_oauth, 
 from app.gmb.oauth import GoogleOAuthService
 from app.gmb.router import router as gmb_router
 from app.auth_signup.router import router as auth_signup_router
+from app.payments.router import router as payments_router
 from app.core.settings import Settings, get_settings
 from app.core.state_token import StateTokenError, sign_state, verify_state
 from app.core.supabase_gateway import SupabaseGateway
@@ -23,6 +24,7 @@ app = FastAPI(title="Cradible5 GMB OAuth Backend", version="1.0.0")
 # Register routers
 app.include_router(gmb_router, prefix="/gmb", tags=["gmb"])
 app.include_router(auth_signup_router, prefix="/auth", tags=["auth"])
+app.include_router(payments_router, prefix="/payments", tags=["payments"])
 
 app.add_middleware(
     CORSMiddleware,

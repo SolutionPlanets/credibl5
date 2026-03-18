@@ -14,8 +14,8 @@ import {
 
 import type { OnboardingDraft, SelectableItem } from "@/components/onboarding/types";
 
-export const TOTAL_STEPS = 4;
-export const STEP_LABELS = ["Company Info", "Your Goals", "How You Found Us", "Connect With"];
+export const TOTAL_STEPS = 5;
+export const STEP_LABELS = ["Company Info", "Your Goals", "How You Found Us", "Choose Plan", "Connect With"];
 
 export const DEFAULT_DRAFT: OnboardingDraft = {
   companyName: "",
@@ -24,6 +24,10 @@ export const DEFAULT_DRAFT: OnboardingDraft = {
   goals: [],
   source: "",
   sourceOtherText: "",
+  selectedPlan: "free",
+  billingCycle: "monthly",
+  paymentCompleted: false,
+  paidAmountCents: null,
 };
 
 export const GOAL_OPTIONS: SelectableItem[] = [

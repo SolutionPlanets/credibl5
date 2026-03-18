@@ -119,6 +119,10 @@ def is_auth_error(error: Exception) -> bool:
 
 
 def get_error_message(error: Exception) -> str:
+    if isinstance(error, HTTPException):
+        if isinstance(error.detail, dict):
+            return error.detail.get("message") or str(error.detail)
+        return str(error.detail)
     if hasattr(error, "detail"):
         return str(error.detail)
     return str(error)
@@ -259,7 +263,10 @@ def _raise_google_error(response: httpx.Response) -> None:
     if response.status_code == 429:
         raise HTTPException(
             status_code=429,
-            detail="Google Business API rate limit reached. Please wait about 1 minute and try again.",
+            detail={
+                "code": "GOOGLE_RATE_LIMIT",
+                "message": "Google Business API rate limit reached. Please wait about 1 minute and try again."
+            },
         )
 
     try:
@@ -268,7 +275,28 @@ def _raise_google_error(response: httpx.Response) -> None:
             error = payload.get("error", {})
             if isinstance(error, dict):
                 message = error.get("message") or error.get("status") or "Google API error"
+                # Check for specific GMB auth errors
+                if response.status_code in (401, 403):
+                    raise HTTPException(
+                        status_code=401,
+                        detail={
+                            "code": "GOOGLE_AUTH_ERROR",
+                            "message": f"Google connection error: {message}. You may need to reconnect your Google account.",
+                            "original_error": message
+                        }
+                    )
                 raise HTTPException(status_code=response.status_code, detail=message)
+    except HTTPException:
+        raise
     except (ValueError, KeyError):
         pass
+    
+    if response.status_code in (401, 403):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "GOOGLE_AUTH_ERROR",
+                "message": "Google session expired or insufficient permissions. Please reconnect your account."
+            }
+        )
     raise HTTPException(status_code=response.status_code, detail=f"Google API error: {response.status_code}")

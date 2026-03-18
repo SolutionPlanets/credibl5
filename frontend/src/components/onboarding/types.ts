@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react";
+import type { BillingCycle, PlanId } from "@/lib/shared/plan-config";
 
 export type OnboardingDraft = {
   companyName: string;
@@ -7,6 +8,10 @@ export type OnboardingDraft = {
   goals: string[];
   source: string;
   sourceOtherText: string;
+  selectedPlan: PlanId;
+  billingCycle: BillingCycle;
+  paymentCompleted: boolean;
+  paidAmountCents: number | null;
 };
 
 export type SelectableItem = {

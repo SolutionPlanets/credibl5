@@ -633,7 +633,20 @@ export default function Home() {
                           ? "mt-8 h-12 w-full rounded-full bg-white font-bold text-slate-950 shadow-sm hover:bg-slate-100"
                           : "mt-8 h-12 w-full rounded-full bg-slate-950 font-bold text-white shadow-sm hover:bg-slate-800"
                       }
-                      onClick={() => router.push(plan.customPricing ? "/contact" : "/auth/signup")}
+                      onClick={() => {
+                        if (plan.customPricing) {
+                          router.push("/contact");
+                          return;
+                        }
+                        const planIdMap: Record<string, string> = { Trial: "free", Basic: "starter", Pro: "growth" };
+                        const planId = planIdMap[plan.name] || "free";
+                        const params = new URLSearchParams();
+                        if (planId !== "free") {
+                          params.set("plan", planId);
+                          params.set("billing", billingCycle);
+                        }
+                        router.push(`/auth/signup${params.toString() ? `?${params}` : ""}`);
+                      }}
                     >
                       {plan.buttonText}
                     </Button>

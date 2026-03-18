@@ -39,6 +39,7 @@ interface DashboardSidebarProps {
 
 export function DashboardSidebar({ isOpen, onClose, displayName, isGoogleConnected }: DashboardSidebarProps) {
   const pathname = usePathname();
+  const isSettingsActive = pathname === "/protected/settings";
 
   return (
     <>
@@ -148,10 +149,28 @@ export function DashboardSidebar({ isOpen, onClose, displayName, isGoogleConnect
             <p className="px-2 pb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400/80">Support</p>
             <Link
               href="/protected/settings"
-              className="group flex items-center rounded-2xl border border-transparent px-3 py-2 text-sm text-slate-300/85 transition-all duration-200 hover:border-white/10 hover:bg-white/[0.04] hover:text-white"
+              className={cn(
+                "group flex items-center rounded-2xl border px-3 py-2 text-sm transition-all duration-200",
+                isSettingsActive
+                  ? "border-cyan-400/35 bg-cyan-400/14 text-cyan-50 shadow-[0_14px_30px_-22px_rgba(34,211,238,0.9)]"
+                  : "border-transparent text-slate-300/85 hover:border-white/10 hover:bg-white/[0.04] hover:text-white"
+              )}
+              onClick={() => {
+                if (window.innerWidth < 1024) onClose();
+              }}
             >
-              <span className="mr-3 inline-block h-7 w-1.5 rounded-full bg-transparent transition-all group-hover:bg-cyan-300/40" />
-              <Settings className="mr-3 h-5 w-5 text-slate-400 transition-colors group-hover:text-slate-100" />
+              <span
+                className={cn(
+                  "mr-3 inline-block h-7 w-1.5 rounded-full transition-all",
+                  isSettingsActive ? "bg-cyan-300" : "bg-transparent group-hover:bg-cyan-300/40"
+                )}
+              />
+              <Settings
+                className={cn(
+                  "mr-3 h-5 w-5 transition-colors",
+                  isSettingsActive ? "text-cyan-200" : "text-slate-400 group-hover:text-slate-100"
+                )}
+              />
               <span className="font-medium">Settings</span>
             </Link>
           </nav>
