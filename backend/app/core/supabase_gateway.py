@@ -194,7 +194,7 @@ class SupabaseGateway:
         url = f"{self.settings.supabase_url}/rest/v1/locations"
         headers = self._service_headers()
         params = {
-            "select": "id,gmb_account_id,location_id,location_name,address",
+            "select": "id,gmb_account_id,location_id,location_name,address,is_active,activation_locked_until,activated_plan_type,activated_billing_cycle",
             "user_id": f"eq.{user_id}",
             "location_id": f"eq.{gmb_location_id}",
             "limit": "1",
@@ -222,6 +222,65 @@ class SupabaseGateway:
         data = response.json()
         return data[0] if data else location_data
 
+    async def count_user_active_locations(self, user_id: str) -> int:
+        url = f"{self.settings.supabase_url}/rest/v1/locations"
+        headers = self._service_headers()
+        params = {
+            "select": "id",
+            "user_id": f"eq.{user_id}",
+            "is_active": "eq.true",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return len(data)
+
+    async def get_user_active_locations(self, user_id: str) -> List[Dict[str, Any]]:
+        url = f"{self.settings.supabase_url}/rest/v1/locations"
+        headers = self._service_headers()
+        params = {
+            "select": "id,location_id,is_active,activation_locked_until,activated_plan_type,activated_billing_cycle",
+            "user_id": f"eq.{user_id}",
+            "is_active": "eq.true",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return data if isinstance(data, list) else []
+
+    async def deactivate_locations(self, location_ids: List[str]) -> int:
+        if not location_ids:
+            return 0
+
+        url = f"{self.settings.supabase_url}/rest/v1/locations"
+        headers = self._service_headers(
+            {
+                "Prefer": "return=representation",
+                "Content-Type": "application/json",
+            }
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        ids_csv = ",".join(location_ids)
+        params = {"id": f"in.({ids_csv})"}
+        payload = {
+            "is_active": False,
+            "activation_locked_until": None,
+            "activated_plan_type": None,
+            "activated_billing_cycle": None,
+            "activated_at": None,
+            "updated_at": now_iso,
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.patch(url, headers=headers, params=params, json=payload)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return len(data) if isinstance(data, list) else 0
+
     async def get_location_by_id(self, location_id: str) -> Optional[Dict[str, Any]]:
         url = f"{self.settings.supabase_url}/rest/v1/locations"
         headers = self._service_headers()
@@ -236,6 +295,56 @@ class SupabaseGateway:
             raise HTTPException(status_code=500, detail=self._postgrest_error(response))
         data = response.json()
         return data[0] if data else None
+
+    async def get_location_for_user_by_id(self, user_id: str, location_id: str) -> Optional[Dict[str, Any]]:
+        url = f"{self.settings.supabase_url}/rest/v1/locations"
+        headers = self._service_headers()
+        params = {
+            "select": "id,user_id,gmb_account_id,location_id,location_name",
+            "id": f"eq.{location_id}",
+            "user_id": f"eq.{user_id}",
+            "limit": "1",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return data[0] if data else None
+
+    async def get_review_by_id(self, review_id: str) -> Optional[Dict[str, Any]]:
+        url = f"{self.settings.supabase_url}/rest/v1/reviews"
+        headers = self._service_headers()
+        params = {
+            "select": "id,location_id,gmb_review_id,review_reply",
+            "id": f"eq.{review_id}",
+            "limit": "1",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return data[0] if data else None
+
+    async def update_review_reply(self, review_id: str, reply_text: str, synced_at_iso: str) -> None:
+        url = f"{self.settings.supabase_url}/rest/v1/reviews"
+        headers = self._service_headers(
+            {
+                "Prefer": "return=minimal",
+                "Content-Type": "application/json",
+            }
+        )
+        params = {"id": f"eq.{review_id}"}
+        payload = {
+            "review_reply": reply_text,
+            "is_read": True,
+            "synced_at": synced_at_iso,
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.patch(url, headers=headers, params=params, json=payload)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
 
     async def get_review_gmb_ids(self, location_id: str) -> Set[str]:
         url = f"{self.settings.supabase_url}/rest/v1/reviews"

@@ -15,6 +15,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/shared/utils";
+import { usePendingReviews } from "@/lib/pending-reviews-context";
 
 interface NavItem {
   name: string;
@@ -40,6 +41,7 @@ interface DashboardSidebarProps {
 export function DashboardSidebar({ isOpen, onClose, displayName, isGoogleConnected }: DashboardSidebarProps) {
   const pathname = usePathname();
   const isSettingsActive = pathname === "/protected/settings";
+  const { pendingCount } = usePendingReviews();
 
   return (
     <>
@@ -135,9 +137,9 @@ export function DashboardSidebar({ isOpen, onClose, displayName, isGoogleConnect
                     )}
                   />
                   <span className="font-medium">{item.name}</span>
-                  {item.name === "Review Inbox" && (
+                  {item.name === "Review Inbox" && pendingCount > 0 && (
                     <span className="ml-auto rounded-full bg-amber-400 px-2 py-0.5 text-[10px] font-bold text-slate-950">
-                      12
+                      {pendingCount}
                     </span>
                   )}
                 </Link>

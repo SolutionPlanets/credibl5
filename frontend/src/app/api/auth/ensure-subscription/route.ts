@@ -1,8 +1,16 @@
 import { NextResponse } from "next/server";
 import { createAdminClient, createClient } from "@/lib/supabase/server";
 import { createPlanDates, getStoredBillingCycle } from "@/lib/shared/plan-config";
+import { rateLimit, getIP } from "@/lib/rate-limit";
 
-export async function POST() {
+const limiter = rateLimit({ interval: 60_000, limit: 5 });
+
+export async function POST(request: Request) {
+  const { success } = limiter.check(getIP(request));
+  if (!success) {
+    return NextResponse.json({ error: "Too many requests. Please try again later." }, { status: 429 });
+  }
+
   try {
     const supabase = await createClient();
     const adminClient = await createAdminClient();

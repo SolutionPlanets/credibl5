@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Optional, Set
+import logging
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import httpx
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
+
+# Type alias for the token-refresh callback passed from the router.
+# Called with no args, returns a fresh access token string.
+RefreshCallback = Callable[[], Awaitable[str]]
 
 _ACCOUNTS_URL = "https://mybusinessaccountmanagement.googleapis.com/v1/accounts"
 _LOCATIONS_BASE = "https://mybusinessbusinessinformation.googleapis.com/v1"
@@ -155,6 +162,12 @@ async def _get_with_rate_limit_retry(
         if response.status_code != 429:
             return response
 
+        logger.warning(
+            "Google API 429 (attempt %d/%d): url=%s retry_after=%s body=%s",
+            attempt + 1, retries + 1, url,
+            response.headers.get("Retry-After"), response.text[:300],
+        )
+
         if attempt == retries:
             return response
 
@@ -166,7 +179,43 @@ async def _get_with_rate_limit_retry(
     return response
 
 
-async def fetch_gmb_accounts(access_token: str) -> List[Dict[str, Any]]:
+async def _put_with_rate_limit_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Dict[str, str],
+    json: Optional[Dict[str, Any]] = None,
+    retries: int = 2,
+) -> httpx.Response:
+    response: Optional[httpx.Response] = None
+    for attempt in range(retries + 1):
+        response = await client.put(url, headers=headers, json=json)
+        if response.status_code != 429:
+            return response
+
+        logger.warning(
+            "Google API 429 (attempt %d/%d): url=%s retry_after=%s body=%s",
+            attempt + 1,
+            retries + 1,
+            url,
+            response.headers.get("Retry-After"),
+            response.text[:300],
+        )
+
+        if attempt == retries:
+            return response
+
+        retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+        delay_seconds = retry_after if retry_after is not None else min(1.5 * (2 ** attempt), 6.0)
+        await asyncio.sleep(delay_seconds)
+
+    assert response is not None
+    return response
+
+
+async def fetch_gmb_accounts(
+    access_token: str,
+    refresh_callback: Optional[RefreshCallback] = None,
+) -> List[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await _get_with_rate_limit_retry(
             client=client,
@@ -174,8 +223,18 @@ async def fetch_gmb_accounts(access_token: str) -> List[Dict[str, Any]]:
             headers=_auth_headers(access_token),
         )
 
-    if response.status_code == 401 or response.status_code == 403:
-        raise HTTPException(status_code=401, detail="Google token expired or insufficient permissions.")
+        # 401 interceptor: refresh token and retry once
+        if response.status_code in (401, 403) and refresh_callback:
+            logger.info("Google API 401/403 on accounts — attempting token refresh and retry")
+            new_token = await refresh_callback()
+            response = await _get_with_rate_limit_retry(
+                client=client,
+                url=_ACCOUNTS_URL,
+                headers=_auth_headers(new_token),
+            )
+
+    if response.status_code in (401, 403):
+        _raise_google_error(response)
     if response.status_code >= 400:
         _raise_google_error(response)
 
@@ -183,24 +242,43 @@ async def fetch_gmb_accounts(access_token: str) -> List[Dict[str, Any]]:
     return data.get("accounts", [])
 
 
-async def fetch_gmb_locations(access_token: str, account_name: str) -> List[Dict[str, Any]]:
+async def fetch_gmb_locations(
+    access_token: str,
+    account_name: str,
+    refresh_callback: Optional[RefreshCallback] = None,
+) -> List[Dict[str, Any]]:
     url = f"{_LOCATIONS_BASE}/{account_name}/locations"
     params = {
         "readMask": "name,title,storefrontAddress,phoneNumbers,websiteUri,categories,profile",
         "pageSize": 100,
     }
     locations: List[Dict[str, Any]] = []
+    current_token = access_token
+    retried_auth = False
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         while True:
             response = await _get_with_rate_limit_retry(
                 client=client,
                 url=url,
-                headers=_auth_headers(access_token),
+                headers=_auth_headers(current_token),
                 params=params,
             )
-            if response.status_code == 401 or response.status_code == 403:
-                raise HTTPException(status_code=401, detail="Google token expired or insufficient permissions.")
+
+            # 401 interceptor: refresh token and retry once
+            if response.status_code in (401, 403) and refresh_callback and not retried_auth:
+                logger.info("Google API 401/403 on locations — attempting token refresh and retry")
+                current_token = await refresh_callback()
+                retried_auth = True
+                response = await _get_with_rate_limit_retry(
+                    client=client,
+                    url=url,
+                    headers=_auth_headers(current_token),
+                    params=params,
+                )
+
+            if response.status_code in (401, 403):
+                _raise_google_error(response)
             if response.status_code >= 400:
                 _raise_google_error(response)
 
@@ -218,21 +296,37 @@ async def fetch_gmb_reviews(
     access_token: str,
     gmb_path: str,
     known_review_ids: Optional[Set[str]] = None,
+    refresh_callback: Optional[RefreshCallback] = None,
 ) -> List[Dict[str, Any]]:
     url = f"{_REVIEWS_BASE}/{gmb_path}/reviews"
     params: Dict[str, Any] = {"pageSize": 200}
     all_reviews: List[Dict[str, Any]] = []
+    current_token = access_token
+    retried_auth = False
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
             response = await _get_with_rate_limit_retry(
                 client=client,
                 url=url,
-                headers=_auth_headers(access_token),
+                headers=_auth_headers(current_token),
                 params=params,
             )
-            if response.status_code == 401 or response.status_code == 403:
-                raise HTTPException(status_code=401, detail="Google token expired or insufficient permissions.")
+
+            # 401 interceptor: refresh token and retry once
+            if response.status_code in (401, 403) and refresh_callback and not retried_auth:
+                logger.info("Google API 401/403 on reviews — attempting token refresh and retry")
+                current_token = await refresh_callback()
+                retried_auth = True
+                response = await _get_with_rate_limit_retry(
+                    client=client,
+                    url=url,
+                    headers=_auth_headers(current_token),
+                    params=params,
+                )
+
+            if response.status_code in (401, 403):
+                _raise_google_error(response)
             if response.status_code >= 400:
                 _raise_google_error(response)
 
@@ -259,7 +353,51 @@ async def fetch_gmb_reviews(
     return all_reviews
 
 
+async def upsert_gmb_review_reply(
+    access_token: str,
+    review_path: str,
+    reply_comment: str,
+    refresh_callback: Optional[RefreshCallback] = None,
+) -> Dict[str, Any]:
+    normalized_path = review_path.strip("/")
+    url = f"{_REVIEWS_BASE}/{normalized_path}/reply"
+    payload = {"comment": reply_comment}
+    current_token = access_token
+    retried_auth = False
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await _put_with_rate_limit_retry(
+            client=client,
+            url=url,
+            headers=_auth_headers(current_token),
+            json=payload,
+        )
+
+        if response.status_code in (401, 403) and refresh_callback and not retried_auth:
+            logger.info("Google API 401/403 on review reply - attempting token refresh and retry")
+            current_token = await refresh_callback()
+            retried_auth = True
+            response = await _put_with_rate_limit_retry(
+                client=client,
+                url=url,
+                headers=_auth_headers(current_token),
+                json=payload,
+            )
+
+    if response.status_code in (401, 403):
+        _raise_google_error(response)
+    if response.status_code >= 400:
+        _raise_google_error(response)
+
+    data = response.json()
+    return data if isinstance(data, dict) else {}
+
+
 def _raise_google_error(response: httpx.Response) -> None:
+    logger.warning(
+        "Google API error: status=%s url=%s body=%s",
+        response.status_code, str(response.url), response.text[:500],
+    )
     if response.status_code == 429:
         raise HTTPException(
             status_code=429,

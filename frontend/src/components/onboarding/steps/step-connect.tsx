@@ -6,15 +6,17 @@ type StepConnectProps = {
   email: string | null;
   isGoogleConnected: boolean;
   isGoogleLoading: boolean;
+  isDashboardLoading: boolean;
   googleError: string | null;
   onConnectGoogle: () => Promise<void>;
-  onGoToDashboard: () => void;
+  onGoToDashboard: () => void | Promise<void>;
 };
 
 export function StepConnect({
   email,
   isGoogleConnected,
   isGoogleLoading,
+  isDashboardLoading,
   googleError,
   onConnectGoogle,
   onGoToDashboard,
@@ -54,11 +56,21 @@ export function StepConnect({
             {isGoogleConnected ? (
               <Button
                 type="button"
+                disabled={isDashboardLoading}
                 onClick={onGoToDashboard}
                 className="h-11 w-full rounded-xl bg-reply-green px-5 text-white hover:bg-reply-green/90"
               >
-                <CheckCircle2 className="h-4 w-4" />
-                Connected - Go to Dashboard
+                {isDashboardLoading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Setting up...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="h-4 w-4" />
+                    Connected - Go to Dashboard
+                  </>
+                )}
               </Button>
             ) : (
               <Button

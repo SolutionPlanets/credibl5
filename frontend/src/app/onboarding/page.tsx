@@ -47,7 +47,7 @@ export default async function OnboardingPage({ searchParams }: OnboardingPagePro
   const isGoogleConnected = Boolean(profileData?.google_connected_at);
   const onboardingCompleted = Boolean(profileData?.onboarding_completed);
 
-  if ((onboardingCompleted || isGoogleConnected) && googleState !== "connected") {
+  if (onboardingCompleted && googleState !== "connected") {
     redirect("/protected");
   }
 

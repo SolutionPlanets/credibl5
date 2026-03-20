@@ -57,31 +57,49 @@ export function LoginForm({
 
       if (signInError) throw signInError;
 
-      router.push("/protected");
+      // Ensure they have a subscription row
+      await fetch("/api/auth/ensure-subscription", {
+        method: "POST",
+      });
+
+      // Check if user needs onboarding
+      const { data: profile } = await supabase
+        .from("user_profiles")
+        .select("onboarding_completed")
+        .eq("id", (await supabase.auth.getUser()).data.user?.id)
+        .maybeSingle();
+
+      if (profile?.onboarding_completed) {
+        router.push("/protected");
+      } else {
+        router.push("/onboarding");
+      }
       router.refresh();
     } catch (unknownError: any) {
       const errorMessage = unknownError instanceof Error ? unknownError.message : "Unable to sign in";
-      
-      setError(errorMessage);
 
       // Special handling for "Invalid login credentials" - check if they signed up with Google
       if (errorMessage.toLowerCase().includes("invalid login credentials")) {
         try {
-          const { data: profile } = await supabase
-            .from("user_profiles")
-            .select("has_password")
-            .eq("email", email)
-            .maybeSingle();
+          const res = await fetch("/api/auth/check-provider", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email }),
+          });
 
-          if (profile && profile.has_password === false) {
-            // User exists but has no password (likely signed up via Google)
-            router.push(`/auth/create-password?email=${encodeURIComponent(email)}&notice=${encodeURIComponent("It looks like you usually sign in with Google. Please create a password first to login with your email address.")}`);
-            return;
+          if (res.ok) {
+            const { isGoogleUser } = await res.json();
+            if (isGoogleUser) {
+              setError("This email is registered with Google. Please use 'Continue with Google' to sign in or Create Password.");
+              return;
+            }
           }
         } catch (checkError) {
           console.error("Error checking user profile:", checkError);
         }
       }
+
+      setError(errorMessage);
     } finally {
       setIsPasswordLoading(false);
     }
@@ -107,6 +125,7 @@ export function LoginForm({
           redirectTo: callbackUrl.toString(),
           queryParams: {
             access_type: "offline",
+            prompt: "select_account",
           },
         },
       });
@@ -240,7 +259,7 @@ export function LoginForm({
             >
               {isPasswordLoading ? "Signing in..." : "Sign in"}
             </Button>
-            
+
             <div className="text-right">
               <Link
                 href={`/auth/create-password?email=${encodeURIComponent(email)}`}

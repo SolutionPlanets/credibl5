@@ -52,16 +52,11 @@ export function SignupForm({
       if (signUpError) throw signUpError;
 
       // Seed free subscription row for new password-based accounts.
-      // If signUp didn't return a session (e.g. if auto-login is not immediate), 
-      // try to get it or sign in to ensure cookies are set for the following fetch.
       let session = data.session;
       if (!session) {
-        const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-        if (signInError) throw signInError;
-        session = signInData.session;
+        // If there's no session, it means Supabase requires email confirmation.
+        setInfo("Account created! Please check your email to confirm your account.");
+        return;
       }
 
       // Seed free subscription row for new password-based accounts.
@@ -113,6 +108,7 @@ export function SignupForm({
           redirectTo: callbackUrl.toString(),
           queryParams: {
             access_type: "offline",
+            prompt: "consent",
           },
         },
       });

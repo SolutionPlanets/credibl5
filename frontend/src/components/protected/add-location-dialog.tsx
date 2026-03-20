@@ -10,25 +10,30 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { createClient } from "@/lib/supabase/client";
-import { AlertCircle, CheckCircle2, Loader2, MapPin, RefreshCw } from "lucide-react";
+import { AlertCircle, ArrowLeft, Building2, CheckCircle2, Loader2, MapPin, RefreshCw, Store } from "lucide-react";
 
 // Local Alert component since the UI one might be missing
-const Alert = ({ children, className, variant }: any) => (
-  <div className={`p-4 rounded-2xl flex gap-3 ${variant === 'destructive' ? 'bg-red-50 text-red-900 border border-red-200' : 'bg-blue-50 text-blue-900 border border-blue-200'} ${className}`}>
+type AlertVariant = "default" | "destructive";
+
+type AlertProps = {
+  children: React.ReactNode;
+  className?: string;
+  variant?: AlertVariant;
+};
+
+const Alert = ({ children, className = "", variant = "default" }: AlertProps) => (
+  <div className={`p-4 rounded-2xl flex gap-3 ${variant === "destructive" ? "bg-red-50 text-red-900 border border-red-200" : "bg-blue-50 text-blue-900 border border-blue-200"} ${className}`}>
     {children}
   </div>
 );
 
-const AlertTitle = ({ children }: any) => <h5 className="font-bold leading-none tracking-tight">{children}</h5>;
-const AlertDescription = ({ children }: any) => <div className="text-sm opacity-90">{children}</div>;
+const AlertTitle = ({ children }: { children: React.ReactNode }) => (
+  <h5 className="font-bold leading-none tracking-tight">{children}</h5>
+);
+const AlertDescription = ({ children }: { children: React.ReactNode }) => (
+  <div className="text-sm opacity-90">{children}</div>
+);
 
 interface AddLocationDialogProps {
   isOpen: boolean;
@@ -74,13 +79,24 @@ const isQuotaError = (message: string) => {
   );
 };
 
+const isReconnectError = (error: unknown): boolean => {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: string }).code;
+    return code === "GOOGLE_RECONNECT_REQUIRED" || code === "GOOGLE_AUTH_ERROR";
+  }
+  return false;
+};
+
 const toErrorMessage = (error: unknown) => {
   if (error instanceof Error) {
     return error.message;
   }
-  if (typeof error === 'string') return error;
-  if (typeof error === 'object' && error !== null && 'message' in error) {
-    return (error as any).message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") {
+      return message;
+    }
   }
   return "Something went wrong. Please try again.";
 };
@@ -94,6 +110,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [needsReconnect, setNeedsReconnect] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -102,18 +119,20 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
       setSelectedAccount("");
       setSelectedLocation("");
       setError(null);
+      setNeedsReconnect(false);
     }
   }, [isOpen]);
 
   const fetchAccounts = async () => {
     setLoading(true);
     setError(null);
+    setNeedsReconnect(false);
     let userId = "";
 
     try {
       const supabase = createClient();
       const { data: { session } } = await supabase.auth.getSession();
-      
+
       if (!session) throw new Error("Not authenticated");
       userId = session.user.id;
 
@@ -173,6 +192,12 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
       const message = toErrorMessage(err);
       console.error("Fetch accounts error:", err);
 
+      if (isReconnectError(err)) {
+        setNeedsReconnect(true);
+        setError(message);
+        return;
+      }
+
       const staleCache = userId ? accountsCacheByUser.get(userId) : undefined;
       if (staleCache?.accounts?.length && isQuotaError(message)) {
         accountsRateLimitUntilByUser.set(userId, Date.now() + RATE_LIMIT_COOLDOWN_MS);
@@ -198,9 +223,24 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
     }
   };
 
-  const handleReconnectGoogle = () => {
-    // Redirect to backend OAuth flow
-    window.location.href = `${process.env.NEXT_PUBLIC_GMB_BACKEND_URL}/auth/google/login?next=${encodeURIComponent(window.location.pathname)}`;
+  const handleReconnectGoogle = async () => {
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        window.location.href = '/auth/login';
+        return;
+      }
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_GMB_BACKEND_URL}/auth/google/url?next=${encodeURIComponent('/protected')}`,
+        { headers: { Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) throw new Error("Failed to get Google auth URL");
+      const { authorization_url } = await res.json();
+      window.location.href = authorization_url;
+    } catch {
+      window.location.href = '/protected';
+    }
   };
 
   const fetchLocations = async (accountName: string) => {
@@ -211,7 +251,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
     try {
       const supabase = createClient();
       const { data: { session } } = await supabase.auth.getSession();
-      
+
       if (!session) throw new Error("Not authenticated");
       cacheKey = `${session.user.id}:${accountName}`;
 
@@ -303,7 +343,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
     try {
       const supabase = createClient();
       const { data: { session } } = await supabase.auth.getSession();
-      
+
       if (!session) throw new Error("Not authenticated");
 
       const location = locations.find(l => l.name === selectedLocation);
@@ -338,9 +378,9 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
 
       onSuccess?.();
       onClose();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("Save location error:", err);
-      setError(err.message);
+      setError(toErrorMessage(err));
     } finally {
       setIsSaving(false);
     }
@@ -348,33 +388,57 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-[500px] rounded-3xl">
-        <DialogHeader>
-          <DialogTitle className="text-2xl font-bold flex items-center gap-2">
-            <MapPin className="h-6 w-6 text-sky-600" />
-            Add New Location
-          </DialogTitle>
-          <DialogDescription>
-            {step === "accounts" 
-              ? "Select your Google Business account to see your locations."
-              : "Choose the specific location you want to sync with Credibl5."}
-          </DialogDescription>
-        </DialogHeader>
+      <DialogContent className="sm:max-w-[560px] overflow-hidden rounded-[28px] border border-slate-200 p-0">
+        <div className="border-b border-sky-100 bg-gradient-to-r from-sky-50 via-cyan-50 to-emerald-50">
+          <DialogHeader className="px-6 pb-4 pt-6">
+            <DialogTitle className="text-2xl font-bold flex items-center gap-3 text-slate-900">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-100 text-sky-700">
+                <MapPin className="h-5 w-5" />
+              </span>
+              Add New Location
+            </DialogTitle>
+            <DialogDescription className="text-slate-600">
+              {step === "accounts"
+                ? "Pick the Google account you want to connect."
+                : "Select the location you want to sync with Credibl5."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="px-6 pb-5">
+            <div className="grid grid-cols-2 gap-2">
+              <div
+                className={`rounded-xl border px-3 py-2 text-xs font-semibold ${step === "accounts"
+                  ? "border-sky-300 bg-sky-100 text-sky-800"
+                  : "border-slate-200 bg-white/70 text-slate-500"
+                  }`}
+              >
+                1. Select Account
+              </div>
+              <div
+                className={`rounded-xl border px-3 py-2 text-xs font-semibold ${step === "locations"
+                  ? "border-emerald-300 bg-emerald-100 text-emerald-800"
+                  : "border-slate-200 bg-white/70 text-slate-500"
+                  }`}
+              >
+                2. Select Location
+              </div>
+            </div>
+          </div>
+        </div>
 
-        <div className="py-6">
+        <div className="p-6 pt-5">
           {error && (
             <Alert variant="destructive" className="mb-6 rounded-2xl flex flex-col items-start gap-1">
               <div className="flex gap-3 items-center">
                 <AlertCircle className="h-4 w-4 shrink-0" />
-                <AlertTitle>Error</AlertTitle>
+                <AlertTitle>{needsReconnect ? "Reconnection Required" : "Error"}</AlertTitle>
               </div>
               <AlertDescription className="mt-1 ml-7">
                 {error}
-                {(typeof error === 'string' && (error.includes('Google connection') || error.includes('reconnect'))) && (
+                {(needsReconnect || (typeof error === 'string' && (error.includes('Google connection') || error.includes('reconnect')))) && (
                   <div className="mt-3">
-                    <Button 
-                      size="sm" 
-                      variant="outline" 
+                    <Button
+                      size="sm"
+                      variant="outline"
                       onClick={handleReconnectGoogle}
                       className="bg-white/10 border-red-200 hover:bg-white/20 text-red-900 rounded-xl font-bold"
                     >
@@ -382,11 +446,11 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
                     </Button>
                   </div>
                 )}
-                {(typeof error === 'string' && (error.includes('authenticated') || error.includes('Supabase session') || error.includes('access token'))) && (
+                {!needsReconnect && (typeof error === 'string' && (error.includes('authenticated') || error.includes('Supabase session') || error.includes('access token'))) && (
                   <div className="mt-3">
-                    <Button 
-                      size="sm" 
-                      variant="outline" 
+                    <Button
+                      size="sm"
+                      variant="outline"
                       onClick={() => window.location.href = '/auth/login'}
                       className="bg-white/10 border-red-200 hover:bg-white/20 text-red-900 rounded-xl font-bold"
                     >
@@ -404,25 +468,54 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
               <p className="text-sm text-slate-500 font-medium">Fetching details from Google...</p>
             </div>
           ) : (
-            <div className="space-y-6">
+            <div className="space-y-4">
               {step === "accounts" ? (
-                <div className="space-y-2">
-                  <label className="text-sm font-semibold text-slate-700 ml-1">Select account</label>
-                  <Select onValueChange={handleAccountSelect} value={selectedAccount}>
-                    <SelectTrigger className="h-12 rounded-xl border-slate-200 focus:ring-sky-500">
-                      <SelectValue placeholder="Select a GMB account" />
-                    </SelectTrigger>
-                    <SelectContent className="rounded-xl border-slate-200">
-                      {accounts.map((account) => (
-                        <SelectItem key={account.name} value={account.name} className="py-3 rounded-lg">
-                          <div className="flex flex-col">
-                            <span className="font-medium">{account.accountName}</span>
-                            <span className="text-xs text-slate-500 uppercase tracking-wider">{account.type}</span>
+                <div className="space-y-3">
+                  <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 ml-1">
+                    Google Business Accounts
+                  </label>
+                  <div className="max-h-[300px] overflow-y-auto space-y-2.5 pr-1">
+                    {accounts.map((account) => {
+                      const isSelected = selectedAccount === account.name;
+                      return (
+                        <button
+                          key={account.name}
+                          type="button"
+                          onClick={() => handleAccountSelect(account.name)}
+                          className={`w-full rounded-2xl border px-4 py-3 text-left transition-all ${isSelected
+                            ? "border-sky-400 bg-sky-50 shadow-sm"
+                            : "border-slate-200 bg-white hover:border-slate-300"
+                            }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-start gap-3">
+                              <span
+                                className={`mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg ${isSelected
+                                  ? "bg-sky-200 text-sky-800"
+                                  : "bg-slate-100 text-slate-600"
+                                  }`}
+                              >
+                                <Building2 className="h-4 w-4" />
+                              </span>
+                              <div>
+                                <p className="text-sm font-semibold text-slate-900">
+                                  {account.accountName || "Google Business Account"}
+                                </p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                  {account.type || "Account"} | {account.role || "Member"}
+                                </p>
+                              </div>
+                            </div>
+                            {isSelected ? (
+                              <CheckCircle2 className="h-5 w-5 text-sky-600" />
+                            ) : (
+                              <span className="mt-0.5 h-4 w-4 rounded-full border border-slate-300" />
+                            )}
                           </div>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                        </button>
+                      );
+                    })}
+                  </div>
                   {accounts.length === 0 && !loading && !error && (
                     <p className="text-sm text-amber-600 bg-amber-50 p-3 rounded-xl border border-amber-100 mt-2">
                       No Google Business accounts found. Make sure your primary Google account has at least one business verified.
@@ -432,40 +525,60 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
               ) : (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between ml-1">
-                    <label className="text-sm font-semibold text-slate-700">Select location</label>
-                    <button 
-                      onClick={() => setStep("accounts")}
-                      className="text-xs text-sky-600 font-medium hover:underline"
+                    <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Available Locations</label>
+                    <button
+                      onClick={() => {
+                        setStep("accounts");
+                        setSelectedLocation("");
+                      }}
+                      className="text-xs text-sky-700 font-semibold hover:underline"
                     >
                       Change account
                     </button>
                   </div>
-                  <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                  <div className="max-h-[300px] overflow-y-auto space-y-2.5 pr-1 custom-scrollbar">
                     {locations.map((loc) => (
-                      <div 
+                      <button
+                        type="button"
                         key={loc.name}
                         onClick={() => setSelectedLocation(loc.name)}
-                        className={`p-4 rounded-2xl border-2 cursor-pointer transition-all ${
-                          selectedLocation === loc.name 
-                            ? "border-sky-500 bg-sky-50" 
-                            : "border-slate-100 hover:border-sky-200 hover:bg-slate-50/50"
-                        }`}
+                        className={`w-full p-4 rounded-2xl border text-left transition-all ${selectedLocation === loc.name
+                          ? "border-emerald-400 bg-emerald-50"
+                          : "border-slate-200 bg-white hover:border-slate-300"
+                          }`}
                       >
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <p className={`font-bold ${selectedLocation === loc.name ? "text-sky-900" : "text-slate-900"}`}>
-                              {loc.title}
+                        <div className="flex justify-between items-start gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`flex h-7 w-7 items-center justify-center rounded-lg ${selectedLocation === loc.name
+                                  ? "bg-emerald-200 text-emerald-800"
+                                  : "bg-slate-100 text-slate-600"
+                                  }`}
+                              >
+                                <Store className="h-3.5 w-3.5" />
+                              </span>
+                              <p className={`font-bold truncate ${selectedLocation === loc.name ? "text-emerald-900" : "text-slate-900"}`}>
+                                {loc.title}
+                              </p>
+                            </div>
+                            <p className="text-xs text-slate-500 mt-2 line-clamp-1">
+                              <MapPin className="mr-1 inline h-3 w-3" />
+                              {loc.address || "Address not available"}
                             </p>
-                            <p className="text-xs text-slate-500 mt-1 line-clamp-1">{loc.address}</p>
-                            <Badge variant="outline" className="mt-2 text-[10px] uppercase font-bold tracking-tight py-0 px-1.5 h-5">
-                              {loc.category}
-                            </Badge>
+                            <span className="mt-2 inline-flex h-5 items-center rounded-full border border-slate-200 bg-white px-2 text-[10px] font-bold uppercase tracking-tight text-slate-600">
+                              {loc.category || "General"}
+                            </span>
                           </div>
-                          {selectedLocation === loc.name && (
-                            <CheckCircle2 className="h-5 w-5 text-sky-600" />
-                          )}
+                          <div className="pt-0.5">
+                            {selectedLocation === loc.name ? (
+                              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                            ) : (
+                              <span className="block h-4 w-4 rounded-full border border-slate-300" />
+                            )}
+                          </div>
                         </div>
-                      </div>
+                      </button>
                     ))}
                     {locations.length === 0 && (
                       <p className="text-sm text-slate-500 text-center py-10">
@@ -473,34 +586,55 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
                       </p>
                     )}
                   </div>
+                  {selectedLocation && (
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                      Location selected. You can now save and start sync.
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           )}
         </div>
 
-        <DialogFooter className="gap-2 sm:gap-0">
-          <Button 
-            variant="outline" 
-            onClick={onClose} 
-            className="rounded-xl border-slate-200 h-11 px-6 font-semibold"
-            disabled={isSaving}
-          >
-            Cancel
-          </Button>
+        <DialogFooter className="gap-2 border-t border-slate-100 bg-slate-50/70 px-6 py-4 sm:justify-between">
+          {step === "accounts" && (
+            <Button
+              variant="outline"
+              onClick={onClose}
+              className="rounded-xl border-slate-200 h-11 px-6 font-semibold bg-white hover:bg-slate-100"
+              disabled={isSaving}
+            >
+              Cancel
+            </Button>
+          )}
+          {step === "locations" && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                setStep("accounts");
+                setSelectedLocation("");
+              }}
+              className="rounded-xl border-slate-200 h-11 px-6 font-semibold bg-white hover:bg-slate-100"
+              disabled={isSaving}
+            >
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Back
+            </Button>
+          )}
           {step === "accounts" ? (
-            <Button 
-              onClick={handleNextStep} 
+            <Button
+              onClick={handleNextStep}
               disabled={!selectedAccount || loading}
               className="rounded-xl bg-slate-900 text-white h-11 px-6 font-semibold hover:bg-slate-800"
             >
               Continue
             </Button>
           ) : (
-            <Button 
-              onClick={handleSaveLocation} 
+            <Button
+              onClick={handleSaveLocation}
               disabled={!selectedLocation || isSaving}
-              className="rounded-xl bg-sky-600 text-white h-11 px-6 font-semibold hover:bg-sky-700 shadow-lg shadow-sky-600/20"
+              className="rounded-xl bg-emerald-600 text-white h-11 px-6 font-semibold hover:bg-emerald-700 shadow-lg shadow-emerald-600/20"
             >
               {isSaving ? (
                 <>
@@ -515,9 +649,3 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
     </Dialog>
   );
 }
-
-const Badge = ({ children, className, variant }: any) => (
-  <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 ${className}`}>
-    {children}
-  </span>
-);

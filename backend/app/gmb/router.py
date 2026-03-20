@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.core.deps import get_bearer_token, get_google_oauth, get_supabase_gateway
-from app.gmb.oauth import GoogleOAuthService
+from app.gmb.oauth import GoogleOAuthService, GoogleReconnectRequired
 from app.gmb.helper import (
     convert_star_rating,
     fetch_gmb_accounts,
@@ -19,10 +22,15 @@ from app.gmb.helper import (
     get_error_message,
     get_sentiment,
     is_auth_error,
+    upsert_gmb_review_reply,
 )
 from app.core.supabase_gateway import SupabaseGateway
+from app.core.rate_limit import create_rate_limit
 
 router = APIRouter()
+
+_save_location_limit = create_rate_limit(max_requests=20, window_seconds=60)
+_sync_reviews_limit = create_rate_limit(max_requests=10, window_seconds=60)
 
 # Simple in-memory cache
 # ACCOUNTS_CACHE format: {user_id: {"timestamp": float, "data": Any}}
@@ -33,8 +41,10 @@ ACCOUNT_LOCKS: Dict[str, asyncio.Lock] = {}
 LOCATION_LOCKS: Dict[Tuple[str, str], asyncio.Lock] = {}
 ACCOUNT_RATE_LIMIT_UNTIL: Dict[str, float] = {}
 LOCATION_RATE_LIMIT_UNTIL: Dict[Tuple[str, str], float] = {}
+ACCESS_TOKEN_CACHE: Dict[str, Dict[str, Any]] = {}  # {user_id: {"token": str, "expires_at": float}}
 ACCOUNTS_CACHE_TTL = 900  # 15 minutes
 LOCATIONS_CACHE_TTL = 300  # 5 minutes
+ACCESS_TOKEN_REFRESH_BUFFER = 300  # Refresh 5 minutes before expiry
 GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS = 65
 
 
@@ -54,21 +64,53 @@ def _get_location_lock(cache_key: Tuple[str, str]) -> asyncio.Lock:
     return lock
 
 
+def _invalidate_access_token_cache(user_id: str) -> None:
+    ACCESS_TOKEN_CACHE.pop(user_id, None)
+
+
+async def _force_refresh_access_token(
+    user_id: str,
+    supabase: SupabaseGateway,
+    google_oauth: GoogleOAuthService,
+) -> str:
+    """Invalidate cache and fetch a brand-new access token."""
+    _invalidate_access_token_cache(user_id)
+    return await _get_access_token(user_id, supabase, google_oauth)
+
+
 async def _get_access_token(
     user_id: str,
     supabase: SupabaseGateway,
     google_oauth: GoogleOAuthService,
 ) -> str:
+    cached = ACCESS_TOKEN_CACHE.get(user_id)
+    if cached and time.time() < cached["expires_at"] - ACCESS_TOKEN_REFRESH_BUFFER:
+        logger.debug("Access token cache hit for user %s", user_id)
+        return cached["token"]
+
+    logger.info("Refreshing access token for user %s", user_id)
     connection = await supabase.get_google_connection(user_id)
     if not connection or not connection.get("refresh_token"):
         raise HTTPException(
             status_code=401,
             detail="Google account not connected. Please connect your Google account first.",
         )
-    token_data = await google_oauth.refresh_access_token(connection["refresh_token"])
+
+    try:
+        token_data = await google_oauth.refresh_access_token(connection["refresh_token"])
+    except GoogleReconnectRequired:
+        _invalidate_access_token_cache(user_id)
+        raise
+
     access_token = token_data.get("access_token")
     if not access_token:
         raise HTTPException(status_code=401, detail="Failed to obtain Google access token.")
+
+    expires_in = int(token_data.get("expires_in", 3600))
+    ACCESS_TOKEN_CACHE[user_id] = {
+        "token": access_token,
+        "expires_at": time.time() + expires_in,
+    }
     return access_token
 
 
@@ -85,6 +127,24 @@ class SaveLocationRequest(BaseModel):
 
 class SyncReviewsRequest(BaseModel):
     locationId: str
+
+
+class ReplyReviewRequest(BaseModel):
+    reviewId: str
+    reply: str
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -138,18 +198,23 @@ async def get_accounts(
 
         google_token = await _get_access_token(user.id, supabase, google_oauth)
 
+        async def _refresh_cb() -> str:
+            return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
         try:
-            accounts = await fetch_gmb_accounts(google_token)
+            accounts = await fetch_gmb_accounts(google_token, refresh_callback=_refresh_cb)
             ACCOUNT_RATE_LIMIT_UNTIL.pop(user.id, None)
             ACCOUNTS_CACHE[user.id] = {"timestamp": time.time(), "data": accounts}
             return {"accounts": accounts}
         except HTTPException as exc:
+            if exc.status_code in (401, 403):
+                _invalidate_access_token_cache(user.id)
             # If rate-limited but we have any cached data, serve it (even if stale).
             if exc.status_code == 429 and user.id in ACCOUNTS_CACHE:
                 return {
-                    "accounts": ACCOUNTS_CACHE[user.id]["data"], 
-                    "cached": True, 
-                    "stale": True, 
+                    "accounts": ACCOUNTS_CACHE[user.id]["data"],
+                    "cached": True,
+                    "stale": True,
                     "rate_limited": True,
                     "message": "Google rate limit reached. Showing your cached accounts. Please retry in about 1 minute."
                 }
@@ -158,16 +223,18 @@ async def get_accounts(
                 raise
             raise
         except Exception as exc:
+            if is_auth_error(exc):
+                _invalidate_access_token_cache(user.id)
             if user.id in ACCOUNTS_CACHE:
                 return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True, "stale": True}
-            
+
             # Re-raise with descriptive error message if it's already an HTTPException
             if isinstance(exc, HTTPException):
                 raise
-            
+
             status_code = 401 if is_auth_error(exc) else 500
             detail = get_error_message(exc)
-            
+
             # Specifically handle GMB auth errors
             if "google" in detail.lower() or "token" in detail.lower():
                 detail = {
@@ -230,8 +297,11 @@ async def get_locations(
 
         google_token = await _get_access_token(user.id, supabase, google_oauth)
 
+        async def _refresh_cb() -> str:
+            return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
         try:
-            raw_locations = await fetch_gmb_locations(google_token, account_name)
+            raw_locations = await fetch_gmb_locations(google_token, account_name, refresh_callback=_refresh_cb)
             LOCATION_RATE_LIMIT_UNTIL.pop(cache_key, None)
             formatted = [
                 {
@@ -247,10 +317,12 @@ async def get_locations(
             LOCATIONS_CACHE[cache_key] = {"timestamp": time.time(), "data": formatted}
             return {"locations": formatted}
         except HTTPException as exc:
+            if exc.status_code in (401, 403):
+                _invalidate_access_token_cache(user.id)
             if exc.status_code == 429 and cache_key in LOCATIONS_CACHE:
                 return {
-                    "locations": LOCATIONS_CACHE[cache_key]["data"], 
-                    "cached": True, 
+                    "locations": LOCATIONS_CACHE[cache_key]["data"],
+                    "cached": True,
                     "stale": True,
                     "rate_limited": True,
                     "message": "Google rate limit reached. Showing your cached locations. Please retry in about 1 minute."
@@ -260,9 +332,11 @@ async def get_locations(
                 raise
             raise
         except Exception as exc:
+            if is_auth_error(exc):
+                _invalidate_access_token_cache(user.id)
             if cache_key in LOCATIONS_CACHE:
                 return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True, "stale": True}
-            
+
             if isinstance(exc, HTTPException):
                 raise
 
@@ -284,42 +358,99 @@ async def save_location(
     body: SaveLocationRequest,
     supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
     access_token: Annotated[str, Depends(get_bearer_token)],
+    _rate_limit: Annotated[None, Depends(_save_location_limit)] = None,
 ) -> Dict[str, Any]:
     user = await supabase.get_user_from_access_token(access_token)
 
     try:
+        now_utc = datetime.now(timezone.utc)
         existing = await supabase.get_location_by_gmb_location_id(user.id, body.locationId)
-        
-        # Check plan limits for new locations
-        if not existing:
-            sub = await supabase.get_user_subscription(user.id)
-            if sub:
-                max_locs = sub.get("max_locations", 1)
-                current_count = await supabase.count_user_locations(user.id)
-                if current_count >= max_locs:
-                    raise HTTPException(
-                        status_code=403,
-                        detail={
-                            "code": "PLAN_LIMIT_REACHED",
-                            "message": f"You have reached your limit of {max_locs} location(s). Please upgrade your plan to add more.",
-                            "limit": max_locs,
-                            "current": current_count
-                        }
-                    )
+        sub = await supabase.get_user_subscription(user.id)
+
+        plan_type = str((sub or {}).get("plan_type") or "free")
+        billing_cycle = str((sub or {}).get("billing_cycle") or "trial")
+        max_locs = int((sub or {}).get("max_locations") or 1)
+        cycle_end_raw = (sub or {}).get("current_period_end")
+        cycle_end_dt = _parse_iso_datetime(cycle_end_raw)
+        if cycle_end_dt is None:
+            cycle_end_dt = now_utc + timedelta(days=30)
+        cycle_end_iso = cycle_end_dt.isoformat()
+
+        # Backend-triggered lifecycle:
+        # deactivate stale active selections when cycle ended or plan changed.
+        active_locations = await supabase.get_user_active_locations(user.id)
+        deactivate_ids: List[str] = []
+        for row in active_locations:
+            locked_until = _parse_iso_datetime(row.get("activation_locked_until"))
+            activated_plan_type = row.get("activated_plan_type")
+            activated_billing_cycle = row.get("activated_billing_cycle")
+
+            plan_changed = (
+                activated_plan_type is not None
+                and activated_plan_type != plan_type
+            ) or (
+                activated_billing_cycle is not None
+                and activated_billing_cycle != billing_cycle
+            )
+            cycle_expired = locked_until is not None and now_utc >= locked_until
+            legacy_unlocked = locked_until is None
+
+            if plan_changed or cycle_expired or legacy_unlocked:
+                if row.get("id"):
+                    deactivate_ids.append(str(row["id"]))
+
+        if deactivate_ids:
+            await supabase.deactivate_locations(deactivate_ids)
+
+        existing_is_active = bool(existing and existing.get("is_active"))
+        if existing and existing.get("id") and str(existing["id"]) in deactivate_ids:
+            existing_is_active = False
+
+        # Enforce plan limit only on new activation.
+        if not existing_is_active:
+            current_active_count = await supabase.count_user_active_locations(user.id)
+            if max_locs != -1 and current_active_count >= max_locs:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "PLAN_LIMIT_REACHED",
+                        "message": f"You can activate up to {max_locs} location(s) on your current plan. Upgrade or wait for the next billing cycle to change active locations.",
+                        "limit": max_locs,
+                        "current": current_active_count,
+                    },
+                )
 
         location_data: Dict[str, Any] = {
             "user_id": user.id,
+            "email": user.email,
             "gmb_account_id": body.gmbAccountId,
             "location_id": body.locationId,
             "location_name": body.locationName,
             "address": body.address,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": now_utc.isoformat(),
         }
+
+        # Activate and lock this location for the current plan cycle.
+        if not existing_is_active:
+            location_data.update(
+                {
+                    "is_active": True,
+                    "activated_at": now_utc.isoformat(),
+                    "activation_locked_until": cycle_end_iso,
+                    "activated_plan_type": plan_type,
+                    "activated_billing_cycle": billing_cycle,
+                }
+            )
+
         if existing:
             location_data["id"] = existing["id"]
 
         result = await supabase.upsert_location(location_data)
-        return {"success": True, "location": result, "message": "Location saved successfully."}
+        return {
+            "success": True,
+            "location": result,
+            "message": "Location activated successfully for your current plan cycle.",
+        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -332,11 +463,15 @@ async def sync_reviews(
     supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
     google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
     access_token: Annotated[str, Depends(get_bearer_token)],
+    _rate_limit: Annotated[None, Depends(_sync_reviews_limit)] = None,
 ) -> Dict[str, Any]:
     user = await supabase.get_user_from_access_token(access_token)
     google_token = await _get_access_token(user.id, supabase, google_oauth)
 
-    location = await supabase.get_location_by_id(body.locationId)
+    async def _refresh_cb() -> str:
+        return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
+    location = await supabase.get_location_for_user_by_id(user.id, body.locationId)
     if not location:
         raise HTTPException(status_code=404, detail="Location not found.")
 
@@ -344,7 +479,7 @@ async def sync_reviews(
 
     try:
         known_ids = await supabase.get_review_gmb_ids(body.locationId)
-        gmb_reviews = await fetch_gmb_reviews(google_token, gmb_path, known_review_ids=known_ids if known_ids else None)
+        gmb_reviews = await fetch_gmb_reviews(google_token, gmb_path, known_review_ids=known_ids if known_ids else None, refresh_callback=_refresh_cb)
 
         if not gmb_reviews:
             return {
@@ -383,7 +518,86 @@ async def sync_reviews(
             "totalReviews": total,
             "message": f"Synced {synced_count} new reviews. Total: {total}",
         }
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            _invalidate_access_token_cache(user.id)
         raise
     except Exception as exc:
+        if is_auth_error(exc):
+            _invalidate_access_token_cache(user.id)
+        raise HTTPException(status_code=500, detail=get_error_message(exc))
+
+
+@router.post("/reviews/reply")
+async def reply_review(
+    body: ReplyReviewRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+) -> Dict[str, Any]:
+    user = await supabase.get_user_from_access_token(access_token)
+
+    reply_text = body.reply.strip()
+    if not reply_text:
+        raise HTTPException(status_code=400, detail="Reply cannot be empty.")
+    if len(reply_text) > 4096:
+        raise HTTPException(status_code=400, detail="Reply exceeds 4096 characters.")
+
+    review = await supabase.get_review_by_id(body.reviewId)
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found.")
+
+    location_id = str(review.get("location_id") or "").strip()
+    if not location_id:
+        raise HTTPException(status_code=400, detail="Review is missing location mapping.")
+
+    location = await supabase.get_location_for_user_by_id(user.id, location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found.")
+
+    gmb_review_id = str(review.get("gmb_review_id") or "").strip()
+    if not gmb_review_id:
+        raise HTTPException(status_code=400, detail="Review is missing Google review ID.")
+
+    if (
+        gmb_review_id.startswith("accounts/")
+        and "/locations/" in gmb_review_id
+        and "/reviews/" in gmb_review_id
+    ):
+        review_path = gmb_review_id
+    else:
+        review_path = (
+            f"accounts/{location['gmb_account_id']}/"
+            f"locations/{location['location_id']}/reviews/{gmb_review_id}"
+        )
+
+    google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+    async def _refresh_cb() -> str:
+        return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
+    try:
+        google_reply = await upsert_gmb_review_reply(
+            access_token=google_token,
+            review_path=review_path,
+            reply_comment=reply_text,
+            refresh_callback=_refresh_cb,
+        )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await supabase.update_review_reply(body.reviewId, reply_text, now_iso)
+
+        return {
+            "success": True,
+            "reviewId": body.reviewId,
+            "reply": google_reply.get("comment", reply_text),
+            "message": "Reply posted successfully.",
+        }
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            _invalidate_access_token_cache(user.id)
+        raise
+    except Exception as exc:
+        if is_auth_error(exc):
+            _invalidate_access_token_cache(user.id)
         raise HTTPException(status_code=500, detail=get_error_message(exc))

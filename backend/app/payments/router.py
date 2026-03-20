@@ -10,8 +10,13 @@ from app.core.deps import get_bearer_token, get_supabase_gateway
 from app.core.settings import Settings, get_settings
 from app.core.supabase_gateway import SupabaseGateway
 from app.payments.razorpay_service import RazorpayService
+from app.core.rate_limit import create_rate_limit
 
 router = APIRouter()
+
+_create_order_limit = create_rate_limit(max_requests=5, window_seconds=60)
+_verify_payment_limit = create_rate_limit(max_requests=10, window_seconds=60)
+_get_plan_limit = create_rate_limit(max_requests=30, window_seconds=60)
 
 # ---------------------------------------------------------------------------
 # Pricing (USD – amounts in cents for Razorpay)
@@ -76,6 +81,7 @@ async def create_order(
     token: Annotated[str, Depends(get_bearer_token)],
     gateway: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
     settings: Annotated[Settings, Depends(get_settings)],
+    _rate_limit: Annotated[None, Depends(_create_order_limit)],
 ):
     user = await gateway.get_user_from_access_token(token)
 
@@ -114,6 +120,7 @@ async def verify_payment(
     token: Annotated[str, Depends(get_bearer_token)],
     gateway: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
     settings: Annotated[Settings, Depends(get_settings)],
+    _rate_limit: Annotated[None, Depends(_verify_payment_limit)],
 ):
     user = await gateway.get_user_from_access_token(token)
 
@@ -168,6 +175,7 @@ async def verify_payment(
 async def get_plan(
     token: Annotated[str, Depends(get_bearer_token)],
     gateway: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    _rate_limit: Annotated[None, Depends(_get_plan_limit)],
 ):
     user = await gateway.get_user_from_access_token(token)
     subscription = await gateway.get_user_subscription(user.id)

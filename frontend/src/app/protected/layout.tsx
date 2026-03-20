@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import { Menu, Search, Bell, HelpCircle } from "lucide-react";
 import { DashboardSidebar } from "@/components/protected/dashboard-sidebar";
+import { PendingReviewsProvider } from "@/lib/pending-reviews-context";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
@@ -57,10 +58,11 @@ export default function ProtectedLayout({
   const displayName = user?.user_metadata?.full_name || user?.email || "User";
 
   return (
+    <PendingReviewsProvider>
     <div className="flex h-svh overflow-hidden bg-slate-50 text-reply-navy">
-      <DashboardSidebar 
-        isOpen={isSidebarOpen} 
-        onClose={() => setIsSidebarOpen(false)} 
+      <DashboardSidebar
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
         displayName={displayName}
         isGoogleConnected={isGoogleConnected}
       />
@@ -133,5 +135,6 @@ export default function ProtectedLayout({
         </main>
       </div>
     </div>
+    </PendingReviewsProvider>
   );
 }

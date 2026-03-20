@@ -48,12 +48,13 @@ export function NewUserOnboarding({
   preselectedBilling,
 }: NewUserOnboardingProps) {
   const router = useRouter();
-  const [activeStep, setActiveStep] = useState(initialGoogleConnected ? 5 : 1);
+  const [activeStep, setActiveStep] = useState(googleState === "connected" ? 5 : 1);
   const [draft, setDraft] = useState<OnboardingDraft>(DEFAULT_DRAFT);
   const [isLoaded, setIsLoaded] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
   const [googleError, setGoogleError] = useState<string | null>(getGoogleErrorMessage(googleState));
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [isDashboardLoading, setIsDashboardLoading] = useState(false);
   const [showConnectedModal, setShowConnectedModal] = useState(googleState === "connected");
 
   const isGoogleConnected = useMemo(
@@ -66,10 +67,10 @@ export function NewUserOnboarding({
   }, [googleState]);
 
   useEffect(() => {
-    if (initialGoogleConnected) {
+    if (googleState === "connected") {
       setActiveStep(5);
     }
-  }, [initialGoogleConnected]);
+  }, [googleState]);
 
   // Pre-select plan from URL params
   useEffect(() => {
@@ -96,7 +97,7 @@ export function NewUserOnboarding({
         ...parsed,
       }));
 
-      if (parsed.step && parsed.step >= 1 && parsed.step <= TOTAL_STEPS && !initialGoogleConnected) {
+      if (parsed.step && parsed.step >= 1 && parsed.step <= TOTAL_STEPS && googleState !== "connected") {
         setActiveStep(parsed.step);
       }
     } catch {
@@ -104,7 +105,7 @@ export function NewUserOnboarding({
     } finally {
       setIsLoaded(true);
     }
-  }, [initialGoogleConnected]);
+  }, [googleState]);
 
   useEffect(() => {
     if (!isLoaded || isGoogleConnected) return;
@@ -200,10 +201,27 @@ export function NewUserOnboarding({
     }
   };
 
-  const goToDashboard = () => {
+  const goToDashboard = async () => {
+    setIsDashboardLoading(true);
+    setStepError(null);
     window.localStorage.removeItem(STORAGE_KEY);
+
+    // Mark onboarding as completed in the database
+    try {
+      const res = await fetch("/api/auth/complete-onboarding", { method: "POST" });
+      if (!res.ok) {
+        setStepError("Failed to complete onboarding. Please try again.");
+        setIsDashboardLoading(false);
+        return;
+      }
+    } catch (err) {
+      console.error("Failed to mark onboarding complete:", err);
+      setStepError("Failed to complete onboarding. Please try again.");
+      setIsDashboardLoading(false);
+      return;
+    }
+
     router.push("/protected?google=connected");
-    router.refresh();
   };
 
   return (
@@ -272,6 +290,7 @@ export function NewUserOnboarding({
               email={initialEmail}
               isGoogleConnected={isGoogleConnected}
               isGoogleLoading={isGoogleLoading}
+              isDashboardLoading={isDashboardLoading}
               googleError={googleError}
               onConnectGoogle={handleConnectGoogle}
               onGoToDashboard={goToDashboard}
