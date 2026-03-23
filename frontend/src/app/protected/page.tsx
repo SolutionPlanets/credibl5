@@ -18,6 +18,8 @@ import {
   Star,
   Zap,
 } from "lucide-react";
+import { storeReviews, getReviewsByLocations } from "@/lib/review-store";
+import type { StoredReview } from "@/lib/review-store";
 import { cn } from "@/lib/shared/utils";
 import { getPlanDefinition } from "@/lib/shared/plan-config";
 import { ConnectGoogleButton } from "@/components/protected/connect-google-button";
@@ -47,17 +49,7 @@ type LocationRow = {
   is_active: boolean | null;
 };
 
-type ReviewRow = {
-  id: string;
-  location_id: string;
-  reviewer_name: string | null;
-  star_rating: number | null;
-  review_text: string | null;
-  review_date: string | null;
-  sentiment: string | null;
-  review_reply: string | null;
-  synced_at: string | null;
-};
+type ReviewRow = StoredReview;
 
 type DashboardStat = {
   title: string;
@@ -75,9 +67,6 @@ type ActionItem = {
   colorClassName: string;
   onClick: () => void;
 };
-
-const REVIEW_SELECT_COLUMNS =
-  "id,location_id,reviewer_name,star_rating,review_text,review_date,sentiment,review_reply,synced_at";
 
 const timeRangeOptions: Array<{ value: TimeRange; label: string }> = [
   { value: "7d", label: "Last 7 days" },
@@ -145,18 +134,9 @@ export default function ProtectedPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const fetchReviewsForLocations = useCallback(async (locationIds: string[]): Promise<ReviewRow[]> => {
-    if (locationIds.length === 0) return [];
-
-    const supabase = createClient();
-    const { data, error } = await supabase
-      .from("reviews")
-      .select(REVIEW_SELECT_COLUMNS)
-      .in("location_id", locationIds)
-      .order("review_date", { ascending: false });
-
-    if (error) throw new Error(error.message || "Failed to fetch reviews.");
-    return (data ?? []) as ReviewRow[];
+  const fetchReviewsForLocations = useCallback(async (uid: string, locationIds: string[]): Promise<ReviewRow[]> => {
+    if (!uid || locationIds.length === 0) return [];
+    return getReviewsByLocations(uid, locationIds);
   }, []);
 
   const loadDashboard = useCallback(
@@ -207,7 +187,14 @@ export default function ProtectedPage() {
         }
 
         const nextLocations = (locationResponse.data ?? []) as LocationRow[];
-        const nextReviews = await fetchReviewsForLocations(nextLocations.map((location) => location.id));
+        const selectedLocationId = searchParams.get("locationId");
+        let activeLocationIds = nextLocations.filter(loc => loc.is_active).map((location) => location.id);
+
+        if (selectedLocationId && nextLocations.some(loc => loc.id === selectedLocationId)) {
+          activeLocationIds = [selectedLocationId];
+        }
+
+        const nextReviews = await fetchReviewsForLocations(nextUser.id, activeLocationIds);
 
         setProfileData((profileResponse.data ?? null) as ProfileRow | null);
         setSubscriptionData((subscriptionResponse.data ?? null) as SubscriptionRow | null);
@@ -220,7 +207,7 @@ export default function ProtectedPage() {
         setLoading(false);
       }
     },
-    [fetchReviewsForLocations, router]
+    [fetchReviewsForLocations, router, searchParams]
   );
 
   useEffect(() => {
@@ -267,11 +254,24 @@ export default function ProtectedPage() {
 
     try {
       const accessToken = await getAccessToken();
-      const activeLocations = locations.filter((location) => location.is_active === true);
-      const targetLocations = activeLocations.length > 0 ? activeLocations : locations;
+      const selectedLocationId = searchParams.get("locationId");
+      let activeLocations = locations.filter((location) => location.is_active === true);
+
+      if (selectedLocationId) {
+        const selectedLoc = locations.find(loc => loc.id === selectedLocationId);
+        if (selectedLoc) {
+          activeLocations = [selectedLoc];
+        }
+      }
+
+      if (activeLocations.length === 0) {
+        setErrorMessage("You have no active locations to sync reviews for.");
+        setIsSyncing(false);
+        return;
+      }
 
       let totalSyncedCount = 0;
-      for (const location of targetLocations) {
+      for (const location of activeLocations) {
         const response = await fetch(`${backendBaseUrl}/gmb/reviews/sync`, {
           method: "POST",
           headers: {
@@ -292,13 +292,16 @@ export default function ProtectedPage() {
           throw new Error("Failed to sync reviews.");
         }
 
-        const payload = (await response.json()) as { syncedCount?: number };
-        totalSyncedCount += Number(payload.syncedCount ?? 0);
+        const payload = (await response.json()) as { reviews?: ReviewRow[]; count?: number };
+        if (payload.reviews && payload.reviews.length > 0 && user?.id) {
+          await storeReviews(user.id, payload.reviews);
+        }
+        totalSyncedCount += Number(payload.count ?? 0);
       }
 
       await loadDashboard(true);
       setSuccessMessage(
-        `Sync complete for ${targetLocations.length} location(s). ${totalSyncedCount} new review(s) imported.`
+        `Sync complete for ${activeLocations.length} active location(s). ${totalSyncedCount} review(s) fetched.`
       );
     } catch (error) {
       setErrorMessage(toErrorMessage(error));
@@ -315,8 +318,14 @@ export default function ProtectedPage() {
   const locationsCount = locations.length;
   const activeLocationsCount = locations.filter((location) => location.is_active === true).length;
   const activeLocations = useMemo(
-    () => locations.filter((location) => location.is_active === true),
-    [locations]
+    () => {
+      const selectedLocationId = searchParams.get("locationId");
+      if (selectedLocationId) {
+        return locations.filter((location) => location.id === selectedLocationId);
+      }
+      return locations.filter((location) => location.is_active === true);
+    },
+    [locations, searchParams]
   );
 
   const locationNameById = useMemo(() => {
@@ -461,10 +470,10 @@ export default function ProtectedPage() {
       });
     }
 
-    if (pendingRepliesCount > 0) {
+    if (allTimePendingCount > 0) {
       items.push({
         title: "Clear pending queue",
-        description: `${pendingRepliesCount} review(s) waiting for response`,
+        description: `${allTimePendingCount} review(s) waiting for response`,
         icon: MessageSquare,
         colorClassName: "text-amber-700 bg-amber-100",
         onClick: () => router.push("/protected/inbox"),
@@ -492,7 +501,7 @@ export default function ProtectedPage() {
     }
 
     return items.slice(0, 4);
-  }, [handleSyncReviews, isGoogleConnected, locationsCount, pendingRepliesCount, reviews.length, router]);
+  }, [handleSyncReviews, isGoogleConnected, locationsCount, allTimePendingCount, reviews.length, router]);
 
   const renderStars = (ratingValue: number | null) => {
     const rating = Math.max(0, Math.min(5, Number(ratingValue ?? 0)));
@@ -712,40 +721,40 @@ export default function ProtectedPage() {
             ))}
           </div>
 
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.55fr_1fr]">
-            <Card className="overflow-hidden rounded-4xl border-slate-200 bg-white shadow-sm">
-              <CardHeader className="border-b border-slate-100 p-6 sm:p-8">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1.6fr_1fr]">
+            <Card className="overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-sm transition-shadow hover:shadow-md">
+              <CardHeader className="border-b border-slate-100/80 px-6 py-5 sm:px-8 sm:py-6">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <CardTitle className="text-xl font-bold text-slate-900">Recent Reviews</CardTitle>
-                    <CardDescription className="mt-1">
-                      Latest reviews in the selected time range.
+                    <CardTitle className="text-lg font-bold tracking-tight text-slate-900">Recent Reviews</CardTitle>
+                    <CardDescription className="mt-0.5 text-sm text-slate-500">
+                      Latest reviews in the selected time range
                     </CardDescription>
                   </div>
                   <Button
                     asChild
                     variant="outline"
-                    className="rounded-xl border-slate-200 bg-white font-semibold"
+                    className="rounded-xl border-slate-200 bg-white text-sm font-medium text-slate-700 shadow-sm transition-all hover:border-slate-300 hover:bg-slate-50 hover:shadow"
                   >
                     <Link href="/protected/inbox">Open Inbox</Link>
                   </Button>
                 </div>
               </CardHeader>
-              <CardContent className="max-h-[520px] overflow-y-auto p-6 sm:p-8">
+              <CardContent className="max-h-[520px] overflow-y-auto p-5 sm:p-7">
                 {recentReviews.length === 0 ? (
-                  <div className="rounded-3xl border-2 border-dashed border-slate-200 bg-slate-50 p-8 text-center sm:p-12">
-                    <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-white text-slate-400 shadow-sm">
-                      <MessageSquare className="h-7 w-7" />
+                  <div className="rounded-2xl border-2 border-dashed border-slate-200 bg-gradient-to-b from-slate-50 to-white p-8 text-center sm:p-10">
+                    <div className="mx-auto mb-5 flex justify-center">
+                      <img src="/empty-reviews.png" alt="Empty Inbox" className="h-36 w-36 object-contain opacity-90 drop-shadow-sm" />
                     </div>
-                    <p className="mt-4 text-base font-semibold text-slate-900">No synced reviews yet</p>
-                    <p className="mx-auto mt-2 max-w-sm text-sm text-slate-600">
+                    <p className="text-sm font-semibold text-slate-900">No synced reviews yet</p>
+                    <p className="mx-auto mt-1.5 max-w-xs text-[13px] leading-relaxed text-slate-500">
                       Connect at least one location and run your first sync to populate this feed.
                     </p>
-                    <div className="mt-6 flex justify-center">
+                    <div className="mt-5 flex justify-center">
                       <Button
                         onClick={() => void handleSyncReviews()}
                         disabled={isSyncing || locationsCount === 0}
-                        className="rounded-xl bg-slate-900 px-5 font-semibold text-white hover:bg-slate-800"
+                        className="rounded-xl bg-slate-900 px-5 text-sm font-medium text-white shadow-sm transition-all hover:bg-slate-800 hover:shadow"
                       >
                         {isSyncing ? (
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -757,17 +766,17 @@ export default function ProtectedPage() {
                     </div>
                   </div>
                 ) : (
-                  <div className="space-y-3">
+                  <div className="space-y-2.5">
                     {recentReviews.map((review) => {
                       const hasReply = Boolean(review.review_reply?.trim());
                       const reviewerName = review.reviewer_name?.trim() || "Anonymous";
 
                       return (
                         <button
-                          key={review.id}
+                          key={review.gmb_review_id}
                           type="button"
                           onClick={() => router.push("/protected/inbox")}
-                          className="w-full rounded-2xl border border-slate-200 bg-white p-4 text-left transition-colors hover:border-slate-300"
+                          className="group w-full rounded-2xl border border-slate-200/80 bg-white p-4 text-left shadow-sm transition-all hover:border-slate-300 hover:shadow"
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
@@ -786,7 +795,7 @@ export default function ProtectedPage() {
                             </div>
                             <Badge
                               className={cn(
-                                "border-none px-2 py-0.5 text-[10px] font-semibold",
+                                "shrink-0 border-none px-2 py-0.5 text-[10px] font-semibold",
                                 hasReply ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
                               )}
                             >
@@ -794,11 +803,11 @@ export default function ProtectedPage() {
                             </Badge>
                           </div>
 
-                          <p className="mt-3 line-clamp-2 text-xs text-slate-600">
+                          <p className="mt-2.5 line-clamp-2 text-[13px] leading-relaxed text-slate-600">
                             {review.review_text?.trim() || "No review text provided."}
                           </p>
 
-                          <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
+                          <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-400">
                             <span className="truncate">
                               {locationNameById.get(review.location_id) ?? "Unknown location"}
                             </span>
@@ -812,81 +821,85 @@ export default function ProtectedPage() {
               </CardContent>
             </Card>
 
-            <div className="space-y-6">
-              <Card className="overflow-hidden rounded-4xl border-none bg-slate-900 text-white shadow-xl">
-                <div className="bg-gradient-to-br from-sky-500/20 to-emerald-400/10 p-6 sm:p-7">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-white/70">Capacity</p>
-                  <p className="mt-2 text-xl font-semibold">{currentPlan.name} Plan</p>
-                  <p className="mt-1 text-2xl font-semibold">
-                    {creditsUsed} / {creditLimit} credits used
+            <div className="space-y-5">
+              <Card className="overflow-hidden rounded-3xl border-none bg-slate-900 text-white shadow-lg">
+                <div className="bg-gradient-to-br from-sky-500/15 via-transparent to-emerald-400/10 p-6 sm:p-7">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-white/60">Capacity</p>
+                  <p className="mt-2 text-lg font-semibold">{currentPlan.name} Plan</p>
+                  <p className="mt-0.5 text-2xl font-bold tabular-nums tracking-tight">
+                    {creditsUsed} / {creditLimit} <span className="text-base font-medium text-white/70">credits used</span>
                   </p>
-                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
+                  <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/10">
                     <div
-                      className="h-full rounded-full bg-gradient-to-r from-sky-300 to-emerald-300 transition-all"
+                      className="h-full rounded-full bg-gradient-to-r from-sky-400 to-emerald-400 transition-all duration-500"
                       style={{ width: `${creditUsagePercent}%` }}
                     />
                   </div>
-                  <p className="mt-3 text-xs text-white/70">
-                    {creditsRemaining} credits remaining - Reset on {periodEndLabel}
+                  <p className="mt-2.5 text-[11px] text-white/50">
+                    {creditsRemaining} remaining · Resets {periodEndLabel}
                   </p>
                 </div>
-                <div className="space-y-3 p-6 sm:p-7">
+                <div className="space-y-2 p-5 sm:p-6">
                   {[
-                    { title: "Pending replies", value: String(pendingRepliesCount), icon: MessageSquare },
+                    { title: "Pending replies", value: String(allTimePendingCount), icon: MessageSquare },
                     { title: "Connected locations", value: locationsCount.toString(), icon: MapPin },
                     { title: "Active locations", value: activeLocationsCount.toString(), icon: MapPin },
                     { title: "Auto-reply enabled", value: currentPlan.autoReplyEnabled ? "Yes" : "No", icon: Zap },
                   ].map((item) => (
-                    <div key={item.title} className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                    <div key={item.title} className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-2.5 transition-colors hover:bg-white/[0.07]">
                       <div className="flex items-center gap-3">
-                        <item.icon className="h-4 w-4 text-sky-300" />
-                        <span className="text-sm text-white/85">{item.title}</span>
+                        <item.icon className="h-3.5 w-3.5 text-sky-400/80" />
+                        <span className="text-[13px] text-white/75">{item.title}</span>
                       </div>
-                      <span className="text-sm font-semibold text-white">{item.value}</span>
+                      <span className="text-[13px] font-semibold tabular-nums text-white">{item.value}</span>
                     </div>
                   ))}
                 </div>
               </Card>
 
-              <Card className="rounded-4xl border-slate-200 bg-white p-6 shadow-sm sm:p-7">
-                <h3 className="text-lg font-bold text-slate-900">Action Items</h3>
-                {actionItems.length === 0 ? (
-                  <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-                    You are all set. Keep an eye on the inbox for new reviews.
-                  </div>
-                ) : (
-                  <div className="mt-5 space-y-3">
-                    {actionItems.map((item) => (
-                      <button
-                        key={item.title}
-                        type="button"
-                        onClick={item.onClick}
-                        className="group flex w-full items-center justify-between rounded-2xl border border-slate-200 p-4 text-left transition-colors hover:border-slate-300"
-                      >
-                        <div className="flex items-center gap-4">
-                          <div className={cn("flex size-10 items-center justify-center rounded-xl", item.colorClassName)}>
-                            <item.icon className="h-5 w-5" />
+              <Card className="overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-sm transition-shadow hover:shadow-md">
+                <div className="p-6 sm:p-7">
+                  <h3 className="text-lg font-bold tracking-tight text-slate-900">Action Items</h3>
+                  {actionItems.length === 0 ? (
+                    <div className="mt-4 rounded-xl border border-emerald-200/80 bg-emerald-50/50 px-4 py-3 text-[13px] text-emerald-700">
+                      You&apos;re all set — keep an eye on the inbox for new reviews.
+                    </div>
+                  ) : (
+                    <div className="mt-4 space-y-2.5">
+                      {actionItems.map((item) => (
+                        <button
+                          key={item.title}
+                          type="button"
+                          onClick={item.onClick}
+                          className="group flex w-full items-center justify-between rounded-2xl border border-slate-200/80 p-3.5 text-left shadow-sm transition-all hover:border-slate-300 hover:shadow"
+                        >
+                          <div className="flex items-center gap-3.5">
+                            <div className={cn("flex size-9 items-center justify-center rounded-xl", item.colorClassName)}>
+                              <item.icon className="h-4 w-4" />
+                            </div>
+                            <div>
+                              <p className="text-sm font-semibold text-slate-900">{item.title}</p>
+                              <p className="text-xs text-slate-500">{item.description}</p>
+                            </div>
                           </div>
-                          <div>
-                            <p className="text-sm font-semibold text-slate-900">{item.title}</p>
-                            <p className="text-xs text-slate-500">{item.description}</p>
-                          </div>
-                        </div>
-                        <ChevronRight className="h-4 w-4 text-slate-300 transition-colors group-hover:text-slate-600" />
-                      </button>
-                    ))}
-                  </div>
-                )}
+                          <ChevronRight className="h-4 w-4 text-slate-300 transition-transform group-hover:translate-x-0.5 group-hover:text-slate-500" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </Card>
             </div>
           </div>
         </>
       )}
 
-      <AddLocationDialog 
-        isOpen={isAddLocationOpen} 
+      <AddLocationDialog
+        isOpen={isAddLocationOpen}
         onClose={() => setIsAddLocationOpen(false)}
         onSuccess={handleLocationAdded}
+        currentActiveCount={activeLocationsCount}
+        maxLocations={currentPlan.maxLocations}
       />
     </div>
   );

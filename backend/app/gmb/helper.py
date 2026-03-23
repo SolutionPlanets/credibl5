@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import httpx
 from fastapi import HTTPException
@@ -297,12 +297,13 @@ async def fetch_gmb_reviews(
     gmb_path: str,
     known_review_ids: Optional[Set[str]] = None,
     refresh_callback: Optional[RefreshCallback] = None,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], int]:
     url = f"{_REVIEWS_BASE}/{gmb_path}/reviews"
-    params: Dict[str, Any] = {"pageSize": 200}
+    params: Dict[str, Any] = {"pageSize": 50}
     all_reviews: List[Dict[str, Any]] = []
     current_token = access_token
     retried_auth = False
+    pages_fetched = 0
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
@@ -331,7 +332,35 @@ async def fetch_gmb_reviews(
                 _raise_google_error(response)
 
             data = response.json()
+
+            # Detect embedded errors that Google returns inside a 200 response
+            if isinstance(data, dict) and "error" in data:
+                error_info = data["error"]
+                error_code = error_info.get("code") if isinstance(error_info, dict) else None
+                error_msg = error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
+                logger.warning(
+                    "fetch_gmb_reviews: embedded error in 200 response: code=%s msg=%s url=%s",
+                    error_code, error_msg, url,
+                )
+                http_code = int(error_code) if error_code and str(error_code).isdigit() else 400
+                raise HTTPException(status_code=http_code, detail={
+                    "code": "GOOGLE_API_ERROR",
+                    "message": f"Google API error: {error_msg}",
+                })
+
             batch = data.get("reviews", [])
+            pages_fetched += 1
+            logger.debug(
+                "fetch_gmb_reviews: page %d — got %d reviews (raw keys: %s)",
+                pages_fetched, len(batch), list(data.keys()),
+            )
+
+            # Log full raw body when first page is empty (key diagnostic signal)
+            if pages_fetched == 1 and len(batch) == 0:
+                logger.warning(
+                    "fetch_gmb_reviews: EMPTY first page — url=%s raw_body=%s",
+                    url, str(data)[:500],
+                )
 
             if known_review_ids is not None:
                 new_reviews = [
@@ -339,18 +368,35 @@ async def fetch_gmb_reviews(
                     if (r.get("reviewId") or r.get("name")) not in known_review_ids
                 ]
                 all_reviews.extend(new_reviews)
-                # If all reviews in this page are known, stop paginating
+                if len(new_reviews) == 0:
+                    # Entire page is already known — stop early
+                    logger.debug(
+                        "fetch_gmb_reviews: full page known, stopping at page %d", pages_fetched
+                    )
+                    break
                 if len(new_reviews) < len(batch):
+                    # Boundary page: some new, some old. Google returns newest-first so nothing
+                    # newer exists on subsequent pages. Add new ones and stop.
+                    logger.debug(
+                        "fetch_gmb_reviews: boundary page at %d — %d new of %d, stopping",
+                        pages_fetched, len(new_reviews), len(batch),
+                    )
                     break
             else:
                 all_reviews.extend(batch)
 
             next_page_token = data.get("nextPageToken")
             if not next_page_token:
+                logger.debug(
+                    "fetch_gmb_reviews: no nextPageToken after page %d — done", pages_fetched
+                )
                 break
             params = {**params, "pageToken": next_page_token}
 
-    return all_reviews
+    logger.info(
+        "fetch_gmb_reviews: finished — pages=%d total_reviews=%d", pages_fetched, len(all_reviews)
+    )
+    return all_reviews, pages_fetched
 
 
 async def upsert_gmb_review_reply(

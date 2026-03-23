@@ -28,17 +28,19 @@ const Alert = ({ children, className = "", variant = "default" }: AlertProps) =>
   </div>
 );
 
-const AlertTitle = ({ children }: { children: React.ReactNode }) => (
-  <h5 className="font-bold leading-none tracking-tight">{children}</h5>
+const AlertTitle = ({ children, className = "" }: { children: React.ReactNode; className?: string }) => (
+  <h5 className={`font-bold leading-none tracking-tight ${className}`}>{children}</h5>
 );
-const AlertDescription = ({ children }: { children: React.ReactNode }) => (
-  <div className="text-sm opacity-90">{children}</div>
+const AlertDescription = ({ children, className = "" }: { children: React.ReactNode; className?: string }) => (
+  <div className={`text-sm opacity-90 ${className}`}>{children}</div>
 );
 
 interface AddLocationDialogProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess?: () => void;
+  currentActiveCount?: number;
+  maxLocations?: number;
 }
 
 interface GMBAccount {
@@ -101,12 +103,12 @@ const toErrorMessage = (error: unknown) => {
   return "Something went wrong. Please try again.";
 };
 
-export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDialogProps) {
+export function AddLocationDialog({ isOpen, onClose, onSuccess, currentActiveCount = 0, maxLocations = -1 }: AddLocationDialogProps) {
   const [step, setStep] = useState<"accounts" | "locations">("accounts");
   const [accounts, setAccounts] = useState<GMBAccount[]>([]);
   const [locations, setLocations] = useState<GMBLocation[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<string>("");
-  const [selectedLocation, setSelectedLocation] = useState<string>("");
+  const [selectedLocations, setSelectedLocations] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -117,7 +119,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
       fetchAccounts();
       setStep("accounts");
       setSelectedAccount("");
-      setSelectedLocation("");
+      setSelectedLocations([]);
       setError(null);
       setNeedsReconnect(false);
     }
@@ -336,7 +338,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
   };
 
   const handleSaveLocation = async () => {
-    if (!selectedLocation) return;
+    if (selectedLocations.length === 0) return;
 
     setIsSaving(true);
     setError(null);
@@ -346,34 +348,33 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
 
       if (!session) throw new Error("Not authenticated");
 
-      const location = locations.find(l => l.name === selectedLocation);
-      if (!location) throw new Error("Selected location not found");
-
-      // Extract location ID from the name (format: accounts/{accountId}/locations/{locationId})
-      const locationId = selectedLocation.split("/").pop() || "";
       const accountId = selectedAccount.split("/").pop() || "";
 
-      const response = await fetch(`${process.env.NEXT_PUBLIC_GMB_BACKEND_URL}/gmb/locations/save`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          gmbAccountId: accountId,
-          locationId: locationId,
-          locationName: location.title,
-          address: location.address,
-        }),
-      });
+      for (const locName of selectedLocations) {
+        const location = locations.find(l => l.name === locName);
+        if (!location) continue;
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        // Handle plan limit error specifically
-        if (errorData.detail && typeof errorData.detail === 'object' && errorData.detail.code === 'PLAN_LIMIT_REACHED') {
-          throw new Error(errorData.detail.message);
+        // Extract location ID from the name (format: accounts/{accountId}/locations/{locationId})
+        const locationId = locName.split("/").pop() || "";
+
+        const response = await fetch(`${process.env.NEXT_PUBLIC_GMB_BACKEND_URL}/gmb/locations/save`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            gmbAccountId: accountId,
+            locationId: locationId,
+            locationName: location.title,
+            address: location.address,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.detail || "Failed to save location");
         }
-        throw new Error(errorData.detail || "Failed to save location");
       }
 
       onSuccess?.();
@@ -529,7 +530,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
                     <button
                       onClick={() => {
                         setStep("accounts");
-                        setSelectedLocation("");
+                        setSelectedLocations([]);
                       }}
                       className="text-xs text-sky-700 font-semibold hover:underline"
                     >
@@ -541,8 +542,23 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
                       <button
                         type="button"
                         key={loc.name}
-                        onClick={() => setSelectedLocation(loc.name)}
-                        className={`w-full p-4 rounded-2xl border text-left transition-all ${selectedLocation === loc.name
+                        onClick={() => {
+                          setSelectedLocations(prev => {
+                            if (prev.includes(loc.name)) {
+                              setError(null);
+                              return prev.filter(n => n !== loc.name);
+                            } else {
+                              const availableSlots = maxLocations === -1 ? Infinity : Math.max(0, maxLocations - currentActiveCount);
+                              if (prev.length >= availableSlots) {
+                                setError(`You can only save ${maxLocations} location(s) on your current plan. Note: After saving, you will not be able to change or swap active locations until the next billing cycle.`);
+                                return prev;
+                              }
+                              setError(null);
+                              return [...prev, loc.name];
+                            }
+                          })
+                        }}
+                        className={`w-full p-4 rounded-2xl border text-left transition-all ${selectedLocations.includes(loc.name)
                           ? "border-emerald-400 bg-emerald-50"
                           : "border-slate-200 bg-white hover:border-slate-300"
                           }`}
@@ -551,14 +567,14 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <span
-                                className={`flex h-7 w-7 items-center justify-center rounded-lg ${selectedLocation === loc.name
+                                className={`flex h-7 w-7 items-center justify-center rounded-lg ${selectedLocations.includes(loc.name)
                                   ? "bg-emerald-200 text-emerald-800"
                                   : "bg-slate-100 text-slate-600"
                                   }`}
                               >
                                 <Store className="h-3.5 w-3.5" />
                               </span>
-                              <p className={`font-bold truncate ${selectedLocation === loc.name ? "text-emerald-900" : "text-slate-900"}`}>
+                              <p className={`font-bold truncate ${selectedLocations.includes(loc.name) ? "text-emerald-900" : "text-slate-900"}`}>
                                 {loc.title}
                               </p>
                             </div>
@@ -571,7 +587,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
                             </span>
                           </div>
                           <div className="pt-0.5">
-                            {selectedLocation === loc.name ? (
+                            {selectedLocations.includes(loc.name) ? (
                               <CheckCircle2 className="h-5 w-5 text-emerald-600" />
                             ) : (
                               <span className="block h-4 w-4 rounded-full border border-slate-300" />
@@ -586,9 +602,9 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
                       </p>
                     )}
                   </div>
-                  {selectedLocation && (
+                  {selectedLocations.length > 0 && (
                     <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
-                      Location selected. You can now save and start sync.
+                      {selectedLocations.length} location(s) selected. You can now save and start sync.
                     </div>
                   )}
                 </div>
@@ -613,7 +629,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
               variant="outline"
               onClick={() => {
                 setStep("accounts");
-                setSelectedLocation("");
+                setSelectedLocations([]);
               }}
               className="rounded-xl border-slate-200 h-11 px-6 font-semibold bg-white hover:bg-slate-100"
               disabled={isSaving}
@@ -633,7 +649,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
           ) : (
             <Button
               onClick={handleSaveLocation}
-              disabled={!selectedLocation || isSaving}
+              disabled={selectedLocations.length === 0 || isSaving}
               className="rounded-xl bg-emerald-600 text-white h-11 px-6 font-semibold hover:bg-emerald-700 shadow-lg shadow-emerald-600/20"
             >
               {isSaving ? (
@@ -641,7 +657,7 @@ export function AddLocationDialog({ isOpen, onClose, onSuccess }: AddLocationDia
                   <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
                   Saving...
                 </>
-              ) : "Add Location"}
+              ) : `Add Location${selectedLocations.length > 1 ? "s" : ""}`}
             </Button>
           )}
         </DialogFooter>

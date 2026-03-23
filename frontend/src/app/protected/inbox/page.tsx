@@ -3,6 +3,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { getReviewsByLocations, storeReviews, updateReviewReply } from "@/lib/review-store";
+import type { StoredReview } from "@/lib/review-store";
 import { cn } from "@/lib/shared/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,23 +29,7 @@ interface LocationRow {
   is_active: boolean | null;
 }
 
-interface ReviewRow {
-  id: string;
-  location_id: string;
-  gmb_review_id: string | null;
-  reviewer_name: string | null;
-  reviewer_profile_photo_url: string | null;
-  star_rating: number | null;
-  review_text: string | null;
-  review_date: string | null;
-  sentiment: string | null;
-  review_reply: string | null;
-  is_read: boolean | null;
-  synced_at: string | null;
-}
-
-const REVIEW_SELECT_COLUMNS =
-  "id,location_id,gmb_review_id,reviewer_name,reviewer_profile_photo_url,star_rating,review_text,review_date,sentiment,review_reply,is_read,synced_at";
+type ReviewRow = StoredReview;
 
 const statusFilterOptions: Array<{ value: ReviewStatusFilter; label: string }> = [
   { value: "all", label: "All Reviews" },
@@ -102,22 +88,10 @@ export default function InboxPage() {
 
   const fetchReviewsForLocations = useCallback(
     async (locationIds: string[]): Promise<ReviewRow[]> => {
-      if (locationIds.length === 0) return [];
-
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("reviews")
-        .select(REVIEW_SELECT_COLUMNS)
-        .in("location_id", locationIds)
-        .order("review_date", { ascending: false });
-
-      if (error) {
-        throw new Error(error.message || "Failed to fetch reviews.");
-      }
-
-      return (data ?? []) as ReviewRow[];
+      if (!userId || locationIds.length === 0) return [];
+      return getReviewsByLocations(userId, locationIds);
     },
-    []
+    [userId]
   );
 
   const refreshReviews = useCallback(async () => {
@@ -229,19 +203,19 @@ export default function InboxPage() {
       return;
     }
 
-    if (!selectedReviewId || !filteredReviews.some((review) => review.id === selectedReviewId)) {
-      setSelectedReviewId(filteredReviews[0].id);
+    if (!selectedReviewId || !filteredReviews.some((review) => review.gmb_review_id === selectedReviewId)) {
+      setSelectedReviewId(filteredReviews[0].gmb_review_id);
     }
   }, [filteredReviews, selectedReviewId]);
 
   const selectedReview = useMemo(() => {
     if (!selectedReviewId) return null;
-    return filteredReviews.find((review) => review.id === selectedReviewId) ?? null;
+    return filteredReviews.find((review) => review.gmb_review_id === selectedReviewId) ?? null;
   }, [filteredReviews, selectedReviewId]);
 
   useEffect(() => {
     setReplyDraft(selectedReview?.review_reply ?? "");
-  }, [selectedReview?.id, selectedReview?.review_reply]);
+  }, [selectedReview?.gmb_review_id, selectedReview?.review_reply]);
 
   const pendingCount = useMemo(() => {
     return reviews.filter((review) => !review.review_reply?.trim()).length;
@@ -316,8 +290,12 @@ export default function InboxPage() {
           throw new Error("Failed to sync reviews.");
         }
 
-        const payload = (await response.json()) as { syncedCount?: number };
-        totalSyncedCount += Number(payload.syncedCount ?? 0);
+        const payload = (await response.json()) as { reviews?: unknown[]; count?: number };
+        const incoming = (payload.reviews ?? []) as Parameters<typeof storeReviews>[1];
+        if (userId && incoming.length > 0) {
+          await storeReviews(userId, incoming);
+        }
+        totalSyncedCount += Number(payload.count ?? 0);
       }
 
       await refreshReviews();
@@ -362,7 +340,8 @@ export default function InboxPage() {
           Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify({
-          reviewId: selectedReview.id,
+          locationId: selectedReview.location_id,
+          gmbReviewId: selectedReview.gmb_review_id,
           reply,
         }),
       });
@@ -380,6 +359,10 @@ export default function InboxPage() {
         throw new Error("Failed to publish review reply.");
       }
 
+      // Update the reply locally in IndexedDB — no server round-trip needed
+      if (userId) {
+        await updateReviewReply(userId, selectedReview.gmb_review_id, reply);
+      }
       await refreshReviews();
       setSuccessMessage("Reply posted successfully.");
     } catch (error) {
@@ -387,7 +370,7 @@ export default function InboxPage() {
     } finally {
       setIsReplying(false);
     }
-  }, [getAccessToken, refreshReviews, replyDraft, selectedReview]);
+  }, [getAccessToken, refreshReviews, replyDraft, selectedReview, userId]);
 
   const renderStars = (ratingValue: number | null) => {
     const rating = Math.max(0, Math.min(5, Number(ratingValue ?? 0)));
@@ -551,15 +534,15 @@ export default function InboxPage() {
                 </div>
               ) : (
                 filteredReviews.map((review) => {
-                  const isSelected = selectedReviewId === review.id;
+                  const isSelected = selectedReviewId === review.gmb_review_id;
                   const reviewerName = review.reviewer_name?.trim() || "Anonymous";
                   const hasReply = Boolean(review.review_reply?.trim());
 
                   return (
                     <button
-                      key={review.id}
+                      key={review.gmb_review_id}
                       type="button"
-                      onClick={() => setSelectedReviewId(review.id)}
+                      onClick={() => setSelectedReviewId(review.gmb_review_id)}
                       className={cn(
                         "w-full rounded-2xl border p-3 text-left transition-all",
                         isSelected

@@ -130,7 +130,8 @@ class SyncReviewsRequest(BaseModel):
 
 
 class ReplyReviewRequest(BaseModel):
-    reviewId: str
+    locationId: str   # Supabase location UUID
+    gmbReviewId: str  # Google review identifier (full path or short ID)
     reply: str
 
 
@@ -360,6 +361,9 @@ async def save_location(
     access_token: Annotated[str, Depends(get_bearer_token)],
     _rate_limit: Annotated[None, Depends(_save_location_limit)] = None,
 ) -> Dict[str, Any]:
+    if not body.gmbAccountId:
+        raise HTTPException(status_code=400, detail="Google Account ID is missing. Please select an account.")
+
     user = await supabase.get_user_from_access_token(access_token)
 
     try:
@@ -406,19 +410,12 @@ async def save_location(
         if existing and existing.get("id") and str(existing["id"]) in deactivate_ids:
             existing_is_active = False
 
+        limit_reached = False
         # Enforce plan limit only on new activation.
         if not existing_is_active:
             current_active_count = await supabase.count_user_active_locations(user.id)
             if max_locs != -1 and current_active_count >= max_locs:
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "code": "PLAN_LIMIT_REACHED",
-                        "message": f"You can activate up to {max_locs} location(s) on your current plan. Upgrade or wait for the next billing cycle to change active locations.",
-                        "limit": max_locs,
-                        "current": current_active_count,
-                    },
-                )
+                limit_reached = True
 
         location_data: Dict[str, Any] = {
             "user_id": user.id,
@@ -432,24 +429,37 @@ async def save_location(
 
         # Activate and lock this location for the current plan cycle.
         if not existing_is_active:
-            location_data.update(
-                {
-                    "is_active": True,
-                    "activated_at": now_utc.isoformat(),
-                    "activation_locked_until": cycle_end_iso,
-                    "activated_plan_type": plan_type,
-                    "activated_billing_cycle": billing_cycle,
-                }
-            )
+            if limit_reached:
+                location_data.update({"is_active": False})
+            else:
+                location_data.update(
+                    {
+                        "is_active": True,
+                        "activated_at": now_utc.isoformat(),
+                        "activation_locked_until": cycle_end_iso,
+                        "activated_plan_type": plan_type,
+                        "activated_billing_cycle": billing_cycle,
+                    }
+                )
 
         if existing:
             location_data["id"] = existing["id"]
 
         result = await supabase.upsert_location(location_data)
+        
+        if limit_reached:
+            return {
+                "success": True,
+                "location": result,
+                "message": f"Location saved, but not activated because you have reached your plan limit of {max_locs} active locations.",
+                "limit_reached": True,
+            }
+
         return {
             "success": True,
             "location": result,
             "message": "Location activated successfully for your current plan cycle.",
+            "limit_reached": False,
         }
     except HTTPException:
         raise
@@ -475,18 +485,67 @@ async def sync_reviews(
     if not location:
         raise HTTPException(status_code=404, detail="Location not found.")
 
-    gmb_path = f"accounts/{location['gmb_account_id']}/locations/{location['location_id']}"
+    acc_id = location.get('gmb_account_id', '').split('/')[-1]
+    loc_id = location.get('location_id', '').split('/')[-1]
+
+    if not acc_id:
+        # Self-healing: Find account ID automatically
+        accounts = await fetch_gmb_accounts(google_token, refresh_callback=_refresh_cb)
+        for acc in accounts:
+            acc_name = acc.get('name')
+            if not acc_name:
+                continue
+            locs = await fetch_gmb_locations(google_token, acc_name, refresh_callback=_refresh_cb)
+            if any(l.get('name', '').split('/')[-1] == loc_id for l in locs):
+                acc_id = acc_name.split('/')[-1]
+                break
+
+        if not acc_id:
+            logger.error("Could not auto-discover gmb_account_id for location %s", loc_id)
+            raise HTTPException(
+                status_code=400,
+                detail="This location is missing its Google Account ID and we could not auto-recover it. Please re-add this location from the dashboard."
+            )
+
+        logger.info("Auto-recovered gmb_account_id %s for location %s", acc_id, loc_id)
+        try:
+            update_data = {
+                "id": location["id"],
+                "gmb_account_id": acc_id,
+                "user_id": user.id,
+                "location_id": location.get("location_id"),
+                "location_name": location.get("location_name")
+            }
+            await supabase.upsert_location(update_data)
+        except Exception as e:
+            logger.warning("Failed to save recovered gmb_account_id: %s", e)
+
+    gmb_path = f"accounts/{acc_id}/locations/{loc_id}"
 
     try:
-        known_ids = await supabase.get_review_gmb_ids(body.locationId)
-        gmb_reviews = await fetch_gmb_reviews(google_token, gmb_path, known_review_ids=known_ids if known_ids else None, refresh_callback=_refresh_cb)
+        # Always fetch all reviews — client handles deduplication in IndexedDB
+        gmb_reviews, pages_fetched = await fetch_gmb_reviews(
+            google_token, gmb_path,
+            known_review_ids=None,
+            refresh_callback=_refresh_cb,
+        )
+        logger.info(
+            "sync_reviews: location=%s pages=%d fetched=%d",
+            body.locationId, pages_fetched, len(gmb_reviews),
+        )
 
         if not gmb_reviews:
+            logger.warning(
+                "sync_reviews: 0 reviews — locationId=%s gmb_path=%s pages=%d",
+                body.locationId, gmb_path, pages_fetched,
+            )
             return {
                 "success": True,
-                "syncedCount": 0,
-                "totalReviews": len(known_ids),
-                "message": "All reviews are up to date." if known_ids else "No reviews found.",
+                "reviews": [],
+                "count": 0,
+                "pagesFetched": pages_fetched,
+                "gmb_path": gmb_path,
+                "message": "No reviews found for this location.",
             }
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -505,18 +564,17 @@ async def sync_reviews(
                 "review_date": review.get("createTime"),
                 "sentiment": get_sentiment(star_rating, review.get("comment", "")),
                 "is_read": False,
-                "review_reply": reply_obj.get("comment", "") if reply_obj else None,
+                "review_reply": reply_obj.get("comment") if reply_obj else None,
                 "synced_at": now_iso,
             })
 
-        synced_count = await supabase.batch_upsert_reviews(batch)
-        total = len(known_ids) + synced_count
-
+        # Reviews are returned to the client for browser storage — not persisted to Supabase
         return {
             "success": True,
-            "syncedCount": synced_count,
-            "totalReviews": total,
-            "message": f"Synced {synced_count} new reviews. Total: {total}",
+            "reviews": batch,
+            "count": len(batch),
+            "pagesFetched": pages_fetched,
+            "message": f"Fetched {len(batch)} reviews from Google.",
         }
     except HTTPException as exc:
         if exc.status_code in (401, 403):
@@ -543,21 +601,17 @@ async def reply_review(
     if len(reply_text) > 4096:
         raise HTTPException(status_code=400, detail="Reply exceeds 4096 characters.")
 
-    review = await supabase.get_review_by_id(body.reviewId)
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found.")
+    gmb_review_id = body.gmbReviewId.strip()
+    if not gmb_review_id:
+        raise HTTPException(status_code=400, detail="gmbReviewId is required.")
 
-    location_id = str(review.get("location_id") or "").strip()
+    location_id = body.locationId.strip()
     if not location_id:
-        raise HTTPException(status_code=400, detail="Review is missing location mapping.")
+        raise HTTPException(status_code=400, detail="locationId is required.")
 
     location = await supabase.get_location_for_user_by_id(user.id, location_id)
     if not location:
         raise HTTPException(status_code=404, detail="Location not found.")
-
-    gmb_review_id = str(review.get("gmb_review_id") or "").strip()
-    if not gmb_review_id:
-        raise HTTPException(status_code=400, detail="Review is missing Google review ID.")
 
     if (
         gmb_review_id.startswith("accounts/")
@@ -566,10 +620,10 @@ async def reply_review(
     ):
         review_path = gmb_review_id
     else:
-        review_path = (
-            f"accounts/{location['gmb_account_id']}/"
-            f"locations/{location['location_id']}/reviews/{gmb_review_id}"
-        )
+        acc_id = location['gmb_account_id'].split('/')[-1]
+        loc_id = location['location_id'].split('/')[-1]
+        review_id = gmb_review_id.split('/')[-1]
+        review_path = f"accounts/{acc_id}/locations/{loc_id}/reviews/{review_id}"
 
     google_token = await _get_access_token(user.id, supabase, google_oauth)
 
@@ -584,12 +638,9 @@ async def reply_review(
             refresh_callback=_refresh_cb,
         )
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        await supabase.update_review_reply(body.reviewId, reply_text, now_iso)
-
         return {
             "success": True,
-            "reviewId": body.reviewId,
+            "gmbReviewId": gmb_review_id,
             "reply": google_reply.get("comment", reply_text),
             "message": "Reply posted successfully.",
         }

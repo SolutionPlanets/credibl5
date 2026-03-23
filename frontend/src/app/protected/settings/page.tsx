@@ -807,6 +807,17 @@ export default function SettingsPage() {
               </div>
             </div>
 
+            {isGoogleConnected && (
+              <p className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                If your review count seems low, use{" "}
+                <strong className="font-semibold text-slate-700">Full Re-sync</strong> on the{" "}
+                <a href="/protected" className="text-indigo-600 underline hover:text-indigo-800">
+                  Dashboard
+                </a>
+                . No reconnection needed.
+              </p>
+            )}
+
             {googleError && (
               <p className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
                 {googleError}

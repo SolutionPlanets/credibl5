@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import HTTPException
@@ -312,75 +312,6 @@ class SupabaseGateway:
         data = response.json()
         return data[0] if data else None
 
-    async def get_review_by_id(self, review_id: str) -> Optional[Dict[str, Any]]:
-        url = f"{self.settings.supabase_url}/rest/v1/reviews"
-        headers = self._service_headers()
-        params = {
-            "select": "id,location_id,gmb_review_id,review_reply",
-            "id": f"eq.{review_id}",
-            "limit": "1",
-        }
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, headers=headers, params=params)
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
-        data = response.json()
-        return data[0] if data else None
-
-    async def update_review_reply(self, review_id: str, reply_text: str, synced_at_iso: str) -> None:
-        url = f"{self.settings.supabase_url}/rest/v1/reviews"
-        headers = self._service_headers(
-            {
-                "Prefer": "return=minimal",
-                "Content-Type": "application/json",
-            }
-        )
-        params = {"id": f"eq.{review_id}"}
-        payload = {
-            "review_reply": reply_text,
-            "is_read": True,
-            "synced_at": synced_at_iso,
-        }
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.patch(url, headers=headers, params=params, json=payload)
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
-
-    async def get_review_gmb_ids(self, location_id: str) -> Set[str]:
-        url = f"{self.settings.supabase_url}/rest/v1/reviews"
-        headers = self._service_headers()
-        params = {
-            "select": "gmb_review_id",
-            "location_id": f"eq.{location_id}",
-        }
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, headers=headers, params=params)
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
-        data = response.json()
-        return {row["gmb_review_id"] for row in data if row.get("gmb_review_id")}
-
-    async def batch_upsert_reviews(self, reviews: List[Dict[str, Any]]) -> int:
-        if not reviews:
-            return 0
-        url = f"{self.settings.supabase_url}/rest/v1/reviews"
-        headers = self._service_headers(
-            {
-                "Prefer": "resolution=merge-duplicates,return=minimal",
-                "Content-Type": "application/json",
-            }
-        )
-        params = {"on_conflict": "gmb_review_id"}
-        CHUNK = 400
-        synced = 0
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for i in range(0, len(reviews), CHUNK):
-                chunk = reviews[i : i + CHUNK]
-                response = await client.post(url, headers=headers, params=params, json=chunk)
-                if response.status_code >= 400:
-                    raise HTTPException(status_code=500, detail=self._postgrest_error(response))
-                synced += len(chunk)
-        return synced
 
     async def _get_profile_google_connected_at(self, user_id: str) -> Optional[str]:
         profile_url = f"{self.settings.supabase_url}/rest/v1/user_profiles"
