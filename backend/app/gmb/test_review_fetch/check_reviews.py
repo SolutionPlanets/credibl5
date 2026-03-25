@@ -14,8 +14,8 @@ CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 
 # Use these IDs as they are confirmed to be the correct GMB ones from your logs
-DEFAULT_ACCOUNT_ID = "104690922755529726751"
-DEFAULT_LOCATION_ID = "2859400714063434514"
+DEFAULT_ACCOUNT_ID = os.environ.get("account_id", "")
+DEFAULT_LOCATION_ID = os.environ.get("location_id", "")
 
 # Your provided Refresh Token
 refresh_token = os.environ.get("refresh_token", "")
