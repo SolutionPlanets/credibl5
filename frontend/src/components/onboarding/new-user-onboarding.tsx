@@ -208,7 +208,7 @@ export function NewUserOnboarding({
 
     // Mark onboarding as completed in the database
     try {
-      const res = await fetch("/api/auth/complete-onboarding", { method: "POST" });
+      const res = await fetch("/routes/complete_onboarding_routes", { method: "POST" });
       if (!res.ok) {
         setStepError("Failed to complete onboarding. Please try again.");
         setIsDashboardLoading(false);

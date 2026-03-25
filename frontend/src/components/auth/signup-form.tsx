@@ -60,7 +60,7 @@ export function SignupForm({
       }
 
       // Seed free subscription row for new password-based accounts.
-      const bootstrapResponse = await fetch("/api/auth/ensure-subscription", {
+      const bootstrapResponse = await fetch("/routes/ensure_subscription_routes", {
         method: "POST",
       });
 
@@ -97,7 +97,7 @@ export function SignupForm({
       if (planParam) onboardingPath.searchParams.set("plan", planParam);
       if (billingParam) onboardingPath.searchParams.set("billing", billingParam);
 
-      const callbackUrl = new URL("/auth/callback", window.location.origin);
+      const callbackUrl = new URL("/routes/callback_routes", window.location.origin);
       callbackUrl.searchParams.set("next", onboardingPath.pathname + onboardingPath.search);
 
       const { error: oauthError } = await supabase.auth.signInWithOAuth({

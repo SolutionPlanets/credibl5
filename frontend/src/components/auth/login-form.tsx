@@ -58,7 +58,7 @@ export function LoginForm({
       if (signInError) throw signInError;
 
       // Ensure they have a subscription row
-      await fetch("/api/auth/ensure-subscription", {
+      await fetch("/routes/ensure_subscription_routes", {
         method: "POST",
       });
 
@@ -81,7 +81,7 @@ export function LoginForm({
       // Special handling for "Invalid login credentials" - check if they signed up with Google
       if (errorMessage.toLowerCase().includes("invalid login credentials")) {
         try {
-          const res = await fetch("/api/auth/check-provider", {
+          const res = await fetch("/routes/check_provider_routes", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email }),
@@ -114,7 +114,7 @@ export function LoginForm({
     setNotice(null);
 
     try {
-      const callbackUrl = new URL("/auth/callback", window.location.origin);
+      const callbackUrl = new URL("/routes/callback_routes", window.location.origin);
       callbackUrl.searchParams.set("next", "/protected");
 
       const { error: oauthError } = await supabase.auth.signInWithOAuth({

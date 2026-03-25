@@ -178,7 +178,7 @@ export default function Home() {
     const code = urlParams.get("code");
 
     if (code) {
-      router.push(`/auth/callback?code=${code}`);
+      router.push(`/routes/callback_routes?code=${code}`);
       return;
     }
 

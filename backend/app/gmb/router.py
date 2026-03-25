@@ -312,6 +312,7 @@ async def get_locations(
                     "phone": loc.get("phoneNumbers", {}).get("primaryPhone", ""),
                     "website": loc.get("websiteUri", ""),
                     "category": loc.get("categories", {}).get("primaryCategory", {}).get("displayName", ""),
+                    "is_verified": loc.get("metadata", {}).get("isVerified", False),
                 }
                 for loc in raw_locations
             ]
@@ -535,9 +536,33 @@ async def sync_reviews(
         )
 
         if not gmb_reviews:
+            # Check if reason might be lack of verification
+            msg = "No reviews found for this location."
+            
+            # Fetch location details and account details to check verification status if 0 reviews
+            try:
+                # Check account verification first
+                raw_accs = await fetch_gmb_accounts(google_token, refresh_callback=_refresh_cb)
+                this_acc = next((a for a in raw_accs if a.get("name", "").split("/")[-1] == str(acc_id)), None)
+                
+                if this_acc and this_acc.get("verificationState") != "VERIFIED":
+                    msg = (
+                        "Google API returned no reviews. Your Google Business Account is currently 'UNVERIFIED' or 'PENDING'. "
+                        "Google restricts API access for unverified accounts. Please complete your account verification in the "
+                        "Google Business Profile console and try again."
+                    )
+                else:
+                    # Account is verified, check the specific location
+                    raw_locs = await fetch_gmb_locations(google_token, f"accounts/{acc_id}", refresh_callback=_refresh_cb)
+                    this_loc = next((l for l in raw_locs if l.get("name", "").split("/")[-1] == loc_id), None)
+                    if this_loc and not this_loc.get("metadata", {}).get("isVerified"):
+                        msg = "Google API returned no reviews. This usually happens because your location is not yet 'Verified' in Google Business Profile. Please complete verification on Google and try again in 24-48 hours."
+            except Exception as e:
+                logger.warning("Failed to check verification status during empty sync: %s", e)
+
             logger.warning(
-                "sync_reviews: 0 reviews — locationId=%s gmb_path=%s pages=%d",
-                body.locationId, gmb_path, pages_fetched,
+                "sync_reviews: 0 reviews — locationId=%s gmb_path=%s pages=%d msg=%s",
+                body.locationId, gmb_path, pages_fetched, msg,
             )
             return {
                 "success": True,
@@ -545,7 +570,7 @@ async def sync_reviews(
                 "count": 0,
                 "pagesFetched": pages_fetched,
                 "gmb_path": gmb_path,
-                "message": "No reviews found for this location.",
+                "message": msg,
             }
 
         now_iso = datetime.now(timezone.utc).isoformat()

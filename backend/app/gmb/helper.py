@@ -233,13 +233,15 @@ async def fetch_gmb_accounts(
                 headers=_auth_headers(new_token),
             )
 
-    if response.status_code in (401, 403):
-        _raise_google_error(response)
-    if response.status_code >= 400:
-        _raise_google_error(response)
+        if response.status_code in (401, 403):
+            _raise_google_error(response)
+        if response.status_code >= 400:
+            _raise_google_error(response)
 
-    data = response.json()
-    return data.get("accounts", [])
+        data = response.json()
+        accounts = data.get("accounts", [])
+        logger.info("fetch_gmb_accounts: found %d accounts", len(accounts))
+        return accounts
 
 
 async def fetch_gmb_locations(
@@ -249,7 +251,7 @@ async def fetch_gmb_locations(
 ) -> List[Dict[str, Any]]:
     url = f"{_LOCATIONS_BASE}/{account_name}/locations"
     params = {
-        "readMask": "name,title,storefrontAddress,phoneNumbers,websiteUri,categories,profile",
+        "readMask": "name,title,storefrontAddress,phoneNumbers,websiteUri,categories,profile,metadata",
         "pageSize": 100,
     }
     locations: List[Dict[str, Any]] = []
@@ -358,8 +360,8 @@ async def fetch_gmb_reviews(
             # Log full raw body when first page is empty (key diagnostic signal)
             if pages_fetched == 1 and len(batch) == 0:
                 logger.warning(
-                    "fetch_gmb_reviews: EMPTY first page — url=%s raw_body=%s",
-                    url, str(data)[:500],
+                    "fetch_gmb_reviews: EMPTY first page — status=%d url=%s raw_body=%s",
+                    response.status_code, url, str(data)[:500],
                 )
 
             if known_review_ids is not None:

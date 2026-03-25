@@ -179,7 +179,7 @@ export function DashboardSidebar({ isOpen, onClose, displayName, isGoogleConnect
         </div>
 
         <div className="relative z-10 border-t border-white/10 p-3">
-          <form action="/api/auth/signout" method="POST">
+          <form action="/routes/signout_routes" method="POST">
             <button
               type="submit"
               className="group flex w-full items-center gap-3 rounded-2xl border border-transparent px-3 py-2.5 text-sm text-slate-300 transition-all duration-200 hover:border-red-300/30 hover:bg-red-500/10 hover:text-red-200"

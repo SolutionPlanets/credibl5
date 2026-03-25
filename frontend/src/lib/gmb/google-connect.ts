@@ -65,7 +65,7 @@ export async function startGoogleConnectFlow({
   const startedWithBackend = await startBackendGoogleConnect(supabase, nextPath);
   if (startedWithBackend) return;
 
-  const callbackUrl = new URL("/auth/callback", window.location.origin);
+  const callbackUrl = new URL("/routes/callback_routes", window.location.origin);
   callbackUrl.searchParams.set("flow", flow);
   callbackUrl.searchParams.set("next", nextPath);
 

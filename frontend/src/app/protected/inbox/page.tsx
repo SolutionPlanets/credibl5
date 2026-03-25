@@ -27,6 +27,7 @@ interface LocationRow {
   id: string;
   location_name: string;
   is_active: boolean | null;
+  is_verified?: boolean;
 }
 
 type ReviewRow = StoredReview;
@@ -290,18 +291,27 @@ export default function InboxPage() {
           throw new Error("Failed to sync reviews.");
         }
 
-        const payload = (await response.json()) as { reviews?: unknown[]; count?: number };
+        const payload = (await response.json()) as { reviews?: unknown[]; count?: number; message?: string };
         const incoming = (payload.reviews ?? []) as Parameters<typeof storeReviews>[1];
         if (userId && incoming.length > 0) {
           await storeReviews(userId, incoming);
         }
-        totalSyncedCount += Number(payload.count ?? 0);
+
+        const count = Number(payload.count ?? 0);
+        totalSyncedCount += count;
+
+        // If this specific location had 0 reviews and returned a specific message, surface it
+        if (count === 0 && payload.message && targetLocations.length === 1) {
+          setErrorMessage(payload.message);
+        }
       }
 
       await refreshReviews();
-      setSuccessMessage(
-        `Sync complete for ${targetLocations.length} location(s). ${totalSyncedCount} new review(s) imported.`
-      );
+      if (!errorMessage) {
+        setSuccessMessage(
+          `Sync complete for ${targetLocations.length} location(s). ${totalSyncedCount} new review(s) imported.`
+        );
+      }
     } catch (error) {
       setErrorMessage(toErrorMessage(error));
     } finally {
@@ -479,6 +489,16 @@ export default function InboxPage() {
           </select>
         </CardContent>
       </Card>
+      
+      {selectedLocationId !== "all" && locations.find(l => l.id === selectedLocationId)?.is_verified === false && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 flex items-center gap-2">
+          <MapPin className="h-4 w-4" />
+          <span>
+            <strong>Location Not Verified:</strong> Google only allows fetching reviews via API for verified locations. 
+            Please ensure this business is verified in your Google Business Profile dashboard.
+          </span>
+        </div>
+      )}
 
       {errorMessage && (
         <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">

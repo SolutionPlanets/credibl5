@@ -195,7 +195,7 @@ export default function SettingsPage() {
     const loadData = async () => {
       const supabase = createClient();
 
-      await fetch("/api/auth/ensure-subscription", { method: "POST" }).catch(() => null);
+      await fetch("/routes/ensure_subscription_routes", { method: "POST" }).catch(() => null);
 
       const {
         data: { user },
@@ -362,7 +362,7 @@ export default function SettingsPage() {
     setPlanAlert(null);
 
     try {
-      const response = await fetch("/api/auth/change-plan", {
+      const response = await fetch("/routes/change_plan_routes", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
