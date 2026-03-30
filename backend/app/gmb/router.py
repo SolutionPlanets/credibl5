@@ -25,12 +25,13 @@ from app.gmb.helper import (
     upsert_gmb_review_reply,
 )
 from app.core.supabase_gateway import SupabaseGateway
-from app.core.rate_limit import create_rate_limit
+from app.core.rate_limit import create_rate_limit, RateLimiter
 
 router = APIRouter()
 
 _save_location_limit = create_rate_limit(max_requests=20, window_seconds=60)
-_sync_reviews_limit = create_rate_limit(max_requests=10, window_seconds=60)
+_reply_limit = create_rate_limit(max_requests=5, window_seconds=60)
+_sync_per_location_limiter = RateLimiter(max_requests=2, window_seconds=60)
 
 # Simple in-memory cache
 # ACCOUNTS_CACHE format: {user_id: {"timestamp": float, "data": Any}}
@@ -474,9 +475,15 @@ async def sync_reviews(
     supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
     google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
     access_token: Annotated[str, Depends(get_bearer_token)],
-    _rate_limit: Annotated[None, Depends(_sync_reviews_limit)] = None,
 ) -> Dict[str, Any]:
     user = await supabase.get_user_from_access_token(access_token)
+
+    sync_key = f"{user.id}:{body.locationId}"
+    if not _sync_per_location_limiter.check(sync_key):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many sync requests for this location. Please wait before syncing again.",
+        )
     google_token = await _get_access_token(user.id, supabase, google_oauth)
 
     async def _refresh_cb() -> str:
@@ -617,6 +624,7 @@ async def reply_review(
     supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
     google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
     access_token: Annotated[str, Depends(get_bearer_token)],
+    _rate_limit: Annotated[None, Depends(_reply_limit)] = None,
 ) -> Dict[str, Any]:
     user = await supabase.get_user_from_access_token(access_token)
 

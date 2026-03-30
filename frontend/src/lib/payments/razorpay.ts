@@ -61,7 +61,8 @@ export function loadRazorpayScript(): Promise<boolean> {
 export async function createOrder(
   token: string,
   planType: PlanId,
-  billingCycle: BillingCycle
+  billingCycle: BillingCycle,
+  currency: string = "USD"
 ): Promise<{ id: string; amount: number; currency: string }> {
   const res = await fetch(`${BACKEND_URL}/payments/create-order`, {
     method: "POST",
@@ -69,7 +70,7 @@ export async function createOrder(
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ plan_type: planType, billing_cycle: billingCycle }),
+    body: JSON.stringify({ plan_type: planType, billing_cycle: billingCycle, currency }),
   });
 
   if (!res.ok) {
@@ -88,6 +89,7 @@ export async function verifyPayment(
     razorpay_signature: string;
     plan_type: PlanId;
     billing_cycle: BillingCycle;
+    currency?: string;
   }
 ): Promise<{
   success: boolean;

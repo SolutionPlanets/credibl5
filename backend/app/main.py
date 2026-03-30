@@ -13,18 +13,28 @@ from app.gmb.oauth import GoogleOAuthService
 from app.gmb.router import router as gmb_router
 from app.auth_signup.router import router as auth_signup_router
 from app.payments.router import router as payments_router
+from app.templates.prompt import router as templates_router
+from app.routes.pricing import router as pricing_router
 from app.core.settings import Settings, get_settings
 from app.core.state_token import StateTokenError, sign_state, verify_state
 from app.core.supabase_gateway import SupabaseGateway
+from app.core.rate_limit import create_global_rate_limit
 
 
 settings_for_cors = get_settings()
-app = FastAPI(title="Cradible5 GMB OAuth Backend", version="1.0.0")
+_global_limiter = create_global_rate_limit(max_requests=60, window_seconds=60)
+app = FastAPI(
+    title="Cradible5 GMB OAuth Backend",
+    version="1.0.0",
+    dependencies=[Depends(_global_limiter)],
+)
 
 # Register routers
 app.include_router(gmb_router, prefix="/gmb", tags=["gmb"])
 app.include_router(auth_signup_router, prefix="/auth", tags=["auth"])
 app.include_router(payments_router, prefix="/payments", tags=["payments"])
+app.include_router(templates_router, prefix="/templates", tags=["templates"])
+app.include_router(pricing_router, prefix="/pricing", tags=["pricing"])
 
 app.add_middleware(
     CORSMiddleware,

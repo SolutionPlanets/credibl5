@@ -20,11 +20,12 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { useCurrency } from "@/lib/shared/currency-context";
+import { getPlanPrice, getPlanDefinition, PLAN_DEFINITIONS, PLAN_ORDER, PLAN_RANK, isPlanId } from "@/lib/shared/plan-config";
 import { getFriendlyAuthErrorMessage } from "@/lib/auth/auth-error-message";
 import { startGoogleConnectFlow } from "@/lib/gmb/google-connect";
 import { cn } from "@/lib/shared/utils";
 import {
-  PLAN_DEFINITIONS,
   type BillingCycle,
   type PlanId,
 } from "@/lib/shared/plan-config";
@@ -80,14 +81,7 @@ type AlertState = {
   message: string;
 } | null;
 
-const PLAN_ORDER: PlanId[] = ["free", "starter", "growth", "agency"];
 const SETTINGS_PREFERENCES_KEY = "credibl5-settings-preferences-v1";
-const PLAN_RANK: Record<PlanId, number> = {
-  free: 0,
-  starter: 1,
-  growth: 2,
-  agency: 3,
-};
 
 const LANGUAGE_OPTIONS = [
   { value: "en", label: "English" },
@@ -103,18 +97,6 @@ const TIMEZONE_OPTIONS = [
   "Asia/Kolkata",
   "Asia/Dubai",
 ] as const;
-
-function isPlanId(value: string | null | undefined): value is PlanId {
-  return Boolean(value && value in PLAN_DEFINITIONS);
-}
-
-function formatCurrency(amount: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(amount);
-}
 
 function formatDate(value: string | null | undefined) {
   if (!value) return "Not available";
@@ -167,6 +149,7 @@ function readStoredPreferences(): SettingsPreferences {
 
 export default function SettingsPage() {
   const router = useRouter();
+  const { formatCurrency, dynamicPricing, currency } = useCurrency();
 
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<ProfileRow | null>(null);
@@ -184,12 +167,13 @@ export default function SettingsPage() {
   const [googleError, setGoogleError] = useState<string | null>(null);
 
   const currentPlanId = useMemo<PlanId>(() => {
-    return isPlanId(subscription?.plan_type) ? subscription.plan_type : "free";
+    const planType = subscription?.plan_type;
+    return isPlanId(planType) ? planType : "free";
   }, [subscription?.plan_type]);
 
   const isGoogleConnected = Boolean(profile?.google_connected_at);
   const hasPassword = Boolean(profile?.has_password);
-  const currentPlan = PLAN_DEFINITIONS[currentPlanId];
+  const currentPlan = getPlanDefinition(currentPlanId);
 
   useEffect(() => {
     const loadData = async () => {
@@ -419,7 +403,7 @@ export default function SettingsPage() {
         throw new Error("Session expired. Please sign in again.");
       }
 
-      const order = await createOrder(session.access_token, planId, billingCycle);
+      const order = await createOrder(session.access_token, planId, billingCycle, currency);
 
       const options: RazorpayOptions = {
         key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID ?? "",
@@ -447,6 +431,7 @@ export default function SettingsPage() {
               razorpay_signature: payment.razorpay_signature,
               plan_type: planId,
               billing_cycle: billingCycle,
+              currency: currency,
             });
 
             await refreshSubscription(user.id);
@@ -869,7 +854,7 @@ export default function SettingsPage() {
           </div>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {PLAN_ORDER.map((planId) => {
+            {PLAN_ORDER.map((planId: PlanId) => {
               const plan = PLAN_DEFINITIONS[planId];
               const isCurrent = currentPlanId === planId;
               const currentRank = PLAN_RANK[currentPlanId];
@@ -882,8 +867,7 @@ export default function SettingsPage() {
                 subscription?.billing_cycle !== billingCycle;
               const isCustom = Boolean(plan.isCustom);
               const isPaid = planId !== "free" && !isCustom;
-              const price =
-                billingCycle === "yearly" ? plan.YearlyPrice : plan.MonthlyPrice;
+              const price = getPlanPrice(planId, billingCycle, dynamicPricing, currency) ?? 0;
 
               return (
                 <div

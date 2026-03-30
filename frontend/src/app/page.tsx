@@ -25,6 +25,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { SiteFooter } from "@/components/marketing/site-footer";
 import { SiteHeader } from "@/components/marketing/site-header";
+import { useCurrency } from "@/lib/shared/currency-context";
+import { getPlanPrice } from "@/lib/shared/plan-config";
 
 // ==========================================
 // 1. Types & Static Data Extracted Outside Component
@@ -47,13 +49,7 @@ type AddOn = {
   price: number;
 };
 
-// Extracted formatting logic so it doesn't recreate on every render
-const formatCurrency = (value: number) =>
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(value);
+// Formatting logic is now handled by useCurrency hook
 
 const FEATURE_CARDS = [
   {
@@ -171,6 +167,7 @@ const BILLING_CYCLES = [
 export default function Home() {
   const router = useRouter();
   const [billingCycle, setBillingCycle] = useState<BillingCycle>("monthly");
+  const { formatCurrency, dynamicPricing, currency } = useCurrency();
 
   useEffect(() => {
     const supabase = createClient();
@@ -581,7 +578,11 @@ export default function Home() {
             <div className="mt-14 grid gap-6 lg:grid-cols-4">
               {PRICING_PLANS.map((plan) => {
                 const isPopular = Boolean(plan.popular);
-                const price = billingCycle === "monthly" ? plan.monthlyPrice ?? 0 : plan.yearlyPrice ?? 0;
+                
+                const planIdMap: Record<string, string> = { Trial: "free", Basic: "starter", Pro: "growth" };
+                const planId = planIdMap[plan.name] || "free";
+                
+                const price = getPlanPrice(planId, billingCycle, dynamicPricing, currency) ?? 0;
                 const period = billingCycle === "monthly" ? "/month" : "/year";
 
                 return (

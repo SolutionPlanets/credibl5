@@ -31,3 +31,7 @@ reference/*
 
 # Prevent accidental commits of raw SQL row exports that may contain secrets/PII.
 *_rows.sql
+\
+
+service-account.json
+*/service-account.json

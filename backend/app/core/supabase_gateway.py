@@ -313,6 +313,72 @@ class SupabaseGateway:
         return data[0] if data else None
 
 
+    async def get_ai_credits(self, user_id: str) -> dict:
+        headers = self._service_headers()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Plan-based credits from subscription_plans
+            plan_resp = await client.get(
+                f"{self.settings.supabase_url}/rest/v1/subscription_plans",
+                headers=headers,
+                params={
+                    "select": "total_ai_credits,ai_credits_used,remaining_ai_credits",
+                    "user_id": f"eq.{user_id}",
+                    "limit": "1",
+                },
+            )
+            # Usage count from user_profiles
+            usage_resp = await client.get(
+                f"{self.settings.supabase_url}/rest/v1/user_profiles",
+                headers=headers,
+                params={
+                    "select": "ai_credits",
+                    "id": f"eq.{user_id}",
+                    "limit": "1",
+                },
+            )
+
+        if plan_resp.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(plan_resp))
+        if usage_resp.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(usage_resp))
+
+        plan_data = plan_resp.json()
+        usage_data = usage_resp.json()
+
+        total = plan_data[0].get("total_ai_credits") or 0 if plan_data else 0
+        used = usage_data[0].get("ai_credits") or 0 if usage_data else 0
+        remaining = max(total - used, 0)
+
+        return {
+            "total_ai_credits": total,
+            "ai_credits_used": used,
+            "remaining_ai_credits": remaining,
+        }
+
+    async def add_addon_ai_credits(self, user_id: str, credits: int) -> None:
+        """Add purchased addon credits to total_ai_credits in subscription_plans."""
+        url = f"{self.settings.supabase_url}/rest/v1/subscription_plans"
+        headers = self._service_headers()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            get_resp = await client.get(
+                url,
+                headers=headers,
+                params={"select": "total_ai_credits", "user_id": f"eq.{user_id}", "limit": "1"},
+            )
+        if get_resp.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(get_resp))
+        data = get_resp.json()
+        current = data[0].get("total_ai_credits") or 0 if data else 0
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            patch_resp = await client.patch(
+                url,
+                headers=self._service_headers({"Content-Type": "application/json"}),
+                params={"user_id": f"eq.{user_id}"},
+                json={"total_ai_credits": current + credits},
+            )
+        if patch_resp.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(patch_resp))
+
     async def _get_profile_google_connected_at(self, user_id: str) -> Optional[str]:
         profile_url = f"{self.settings.supabase_url}/rest/v1/user_profiles"
         headers = self._service_headers()

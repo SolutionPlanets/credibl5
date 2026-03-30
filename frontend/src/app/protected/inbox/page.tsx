@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
+  ChevronDown,
+  FileText,
   Loader2,
   MapPin,
   MessageSquareText,
@@ -31,6 +33,14 @@ interface LocationRow {
 }
 
 type ReviewRow = StoredReview;
+
+interface SavedTemplateRow {
+  id: string;
+  title: string;
+  content: string;
+  review_type: string;
+  location_id: string;
+}
 
 const statusFilterOptions: Array<{ value: ReviewStatusFilter; label: string }> = [
   { value: "all", label: "All Reviews" },
@@ -86,6 +96,9 @@ export default function InboxPage() {
   const [isReplying, setIsReplying] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [savedTemplates, setSavedTemplates] = useState<SavedTemplateRow[]>([]);
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
+  const [showTemplateDropdown, setShowTemplateDropdown] = useState(false);
 
   const fetchReviewsForLocations = useCallback(
     async (locationIds: string[]): Promise<ReviewRow[]> => {
@@ -216,7 +229,20 @@ export default function InboxPage() {
 
   useEffect(() => {
     setReplyDraft(selectedReview?.review_reply ?? "");
+    setShowTemplateDropdown(false);
   }, [selectedReview?.gmb_review_id, selectedReview?.review_reply]);
+
+  useEffect(() => {
+    if (!showTemplateDropdown) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest("[data-template-dropdown]")) {
+        setShowTemplateDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showTemplateDropdown]);
 
   const pendingCount = useMemo(() => {
     return reviews.filter((review) => !review.review_reply?.trim()).length;
@@ -381,6 +407,30 @@ export default function InboxPage() {
       setIsReplying(false);
     }
   }, [getAccessToken, refreshReviews, replyDraft, selectedReview, userId]);
+
+  const handleOpenTemplates = useCallback(async () => {
+    if (!selectedReview || !userId) return;
+    setShowTemplateDropdown((prev) => !prev);
+    if (showTemplateDropdown) return;
+    setIsLoadingTemplates(true);
+    try {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from("saved_templates")
+        .select("id,title,content,review_type,location_id")
+        .eq("user_id", userId)
+        .eq("location_id", selectedReview.location_id)
+        .order("created_at", { ascending: false });
+      setSavedTemplates((data ?? []) as SavedTemplateRow[]);
+    } finally {
+      setIsLoadingTemplates(false);
+    }
+  }, [selectedReview, showTemplateDropdown, userId]);
+
+  const handleSelectTemplate = useCallback((template: SavedTemplateRow) => {
+    setReplyDraft(template.content);
+    setShowTemplateDropdown(false);
+  }, []);
 
   const renderStars = (ratingValue: number | null) => {
     const rating = Math.max(0, Math.min(5, Number(ratingValue ?? 0)));
@@ -646,9 +696,82 @@ export default function InboxPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <label htmlFor="reply-text" className="text-sm font-semibold text-slate-800">
-                      Your reply
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="reply-text" className="text-sm font-semibold text-slate-800">
+                        Your reply
+                      </label>
+                      <div className="relative" data-template-dropdown>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleOpenTemplates()}
+                          className="h-8 rounded-lg border-slate-200 px-3 text-xs font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+                        >
+                          {isLoadingTemplates ? (
+                            <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+                          ) : (
+                            <FileText className="mr-1.5 h-3 w-3" />
+                          )}
+                          Use Template
+                          <ChevronDown className="ml-1 h-3 w-3" />
+                        </Button>
+                        {showTemplateDropdown && (
+                          <div className="absolute right-0 top-9 z-50 w-72 rounded-2xl border border-slate-200 bg-white shadow-lg">
+                            <div className="border-b border-slate-100 px-3 py-2">
+                              <p className="text-xs font-semibold text-slate-500">Templates for this location</p>
+                            </div>
+                            <div className="max-h-60 overflow-y-auto p-1.5">
+                              {savedTemplates.length === 0 ? (
+                                <p className="px-3 py-4 text-center text-xs text-slate-500">
+                                  No saved templates for this location.
+                                </p>
+                              ) : (
+                                (() => {
+                                  const sentiment = (selectedReview?.sentiment ?? "").toLowerCase() as "positive" | "negative" | "neutral" | "";
+                                  const matched = savedTemplates.filter((t) => t.review_type === sentiment);
+                                  const others = savedTemplates.filter((t) => t.review_type !== sentiment);
+                                  const ordered = [...matched, ...others];
+                                  return ordered.map((template) => {
+                                    const typeColor =
+                                      template.review_type === "positive"
+                                        ? "bg-emerald-100 text-emerald-700"
+                                        : template.review_type === "negative"
+                                        ? "bg-rose-100 text-rose-700"
+                                        : "bg-amber-100 text-amber-700";
+                                    return (
+                                      <button
+                                        key={template.id}
+                                        type="button"
+                                        onClick={() => handleSelectTemplate(template)}
+                                        className="w-full rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-slate-50"
+                                      >
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="truncate text-xs font-semibold text-slate-800">
+                                            {template.title}
+                                          </span>
+                                          <span
+                                            className={cn(
+                                              "shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold capitalize",
+                                              typeColor
+                                            )}
+                                          >
+                                            {template.review_type}
+                                          </span>
+                                        </div>
+                                        <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-slate-500">
+                                          {template.content}
+                                        </p>
+                                      </button>
+                                    );
+                                  });
+                                })()
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                     <textarea
                       id="reply-text"
                       value={replyDraft}

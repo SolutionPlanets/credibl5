@@ -128,6 +128,19 @@ export const PLAN_DEFINITIONS: Record<PlanId, PlanDefinition> = {
     },
 };
 
+export const PLAN_ORDER: PlanId[] = ["free", "starter", "growth", "agency"];
+
+export const PLAN_RANK: Record<PlanId, number> = {
+    free: 0,
+    starter: 1,
+    growth: 2,
+    agency: 3,
+};
+
+export function isPlanId(value: string | null | undefined): value is PlanId {
+    return Boolean(value && value in PLAN_DEFINITIONS);
+}
+
 export const AI_ADDON_PRICING = [
     { credits: 20, price: 299 },
     { credits: 50, price: 499 },
@@ -156,8 +169,15 @@ export function getPlanLocationLimit(
 
 export function getPlanPrice(
     planId: string | null | undefined,
-    billingCycle: BillingCycle
+    billingCycle: BillingCycle,
+    dynamicPricing?: Record<string, Record<string, { monthly: number; yearly: number }>> | null,
+    currency: string = "USD"
 ): number | null {
+    if (dynamicPricing && planId && dynamicPricing[planId] && dynamicPricing[planId][currency]) {
+        const prices = dynamicPricing[planId][currency];
+        return billingCycle === "yearly" ? prices.yearly : prices.monthly;
+    }
+    
     const plan = getPlanDefinition(planId);
     return billingCycle === "yearly" ? plan.YearlyPrice : plan.MonthlyPrice;
 }

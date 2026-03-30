@@ -7,9 +7,11 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/shared/utils";
 import {
   PLAN_DEFINITIONS,
+  getPlanPrice,
   type BillingCycle,
   type PlanId,
 } from "@/lib/shared/plan-config";
+import { useCurrency } from "@/lib/shared/currency-context";
 import { createClient } from "@/lib/supabase/client";
 import {
   createOrder,
@@ -31,13 +33,6 @@ type StepChoosePlanProps = {
 
 const DISPLAY_PLANS: PlanId[] = ["free", "starter", "growth", "agency"];
 
-const formatCurrency = (value: number) =>
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(value);
-
 export function StepChoosePlan({
   selectedPlan,
   billingCycle,
@@ -47,6 +42,7 @@ export function StepChoosePlan({
   onBillingCycleChange,
   onPaymentComplete,
 }: StepChoosePlanProps) {
+  const { formatCurrency, currency, dynamicPricing } = useCurrency();
   const [isProcessing, setIsProcessing] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [planWarning, setPlanWarning] = useState<string | null>(null);
@@ -97,7 +93,7 @@ export function StepChoosePlan({
         return;
       }
 
-      const order = await createOrder(session.access_token, planId, billingCycle);
+      const order = await createOrder(session.access_token, planId, billingCycle, currency);
 
       const options: RazorpayOptions = {
         key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID ?? "",
@@ -121,6 +117,7 @@ export function StepChoosePlan({
               razorpay_signature: response.razorpay_signature,
               plan_type: planId,
               billing_cycle: billingCycle,
+              currency: currency,
             });
             onPaymentComplete(verification.amount_paid_cents ?? order.amount);
           } catch (error) {
@@ -192,8 +189,7 @@ export function StepChoosePlan({
       <div className="mt-8 grid gap-4 sm:grid-cols-2">
         {DISPLAY_PLANS.map((planId) => {
           const plan = PLAN_DEFINITIONS[planId];
-          const price =
-            billingCycle === "yearly" ? plan.YearlyPrice : plan.MonthlyPrice;
+          const price = getPlanPrice(planId, billingCycle, dynamicPricing, currency) ?? 0;
           const isSelected = selectedPlan === planId;
           const isPaid = planId !== "free" && !plan.isCustom;
           const isCustom = Boolean(plan.isCustom);

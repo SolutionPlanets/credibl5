@@ -71,6 +71,27 @@ class RateLimiter:
         return True
 
 
+def create_global_rate_limit(max_requests: int, window_seconds: int = 60):
+    """
+    Create a FastAPI dependency for a global per-user rate limit.
+    Requests without a Bearer token are silently skipped (public endpoints).
+    """
+    limiter = RateLimiter(max_requests, window_seconds)
+
+    async def _dep(request: Request) -> None:
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return  # unauthenticated — skip
+        key = auth.removeprefix("Bearer ").strip()
+        if key and not limiter.check(key):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many requests. Please try again later.",
+            )
+
+    return _dep
+
+
 def create_rate_limit(
     max_requests: int,
     window_seconds: int = 60,

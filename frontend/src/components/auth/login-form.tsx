@@ -50,6 +50,12 @@ export function LoginForm({
     setNotice(null);
 
     try {
+      const gateRes = await fetch("/routes/login_routes", { method: "POST" });
+      if (!gateRes.ok) {
+        const body = await gateRes.json().catch(() => ({}));
+        throw new Error(body.error ?? "Too many login attempts. Please wait before trying again.");
+      }
+
       const { error: signInError } = await supabase.auth.signInWithPassword({
         email,
         password,

@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     razorpay_key_id: str | None = Field(default=None, alias="RAZORPAY_KEY_ID")
     razorpay_key_secret: str | None = Field(default=None, alias="RAZORPAY_KEY_SECRET")
 
+    pricing_sheet_id: str | None = Field(default=None, alias="PRICING_SHEET_ID")
+    google_service_account_file: str | None = Field(default=None, alias="GOOGLE_SERVICE_ACCOUNT_FILE")
+
     @property
     def service_role_key(self) -> str:
         service_key = self.supabase_service_role_key or self.next_public_supabase_service_key

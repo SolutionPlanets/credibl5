@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Sora, Space_Mono } from "next/font/google";
 import "./globals.css";
+import { Providers } from "./providers";
 
 const sora = Sora({
   variable: "--font-sora",
@@ -29,7 +30,9 @@ export default function RootLayout({
         className={`${sora.variable} ${spaceMono.variable} antialiased`}
         suppressHydrationWarning
       >
-        {children}
+        <Providers>
+          {children}
+        </Providers>
       </body>
     </html>
   );

@@ -218,8 +218,8 @@ export default function TemplatesPage() {
 
   /* ── Handlers ── */
 
-  const handleGenerateTemplates = useCallback(() => {
-    if (!selectedLocationId) return;
+  const handleGenerateTemplates = useCallback(async () => {
+    if (!selectedLocationId || !userId) return;
 
     const bv = brandVoiceByLocationId.get(selectedLocationId);
     if (!bv) {
@@ -231,25 +231,71 @@ export default function TemplatesPage() {
     setIsGenerating(true);
     setErrorMessage(null);
 
-    setTimeout(() => {
-      const templates = generateMockTemplates({
-        id: bv.id,
-        business_name: bv.business_name,
-        tone: bv.tone,
-        key_phrases: bv.key_phrases,
-        phrases_to_avoid: bv.phrases_to_avoid,
-        signature_signoff: bv.signature_signoff,
-        target_audience: bv.target_audience,
-        brand_values: bv.brand_values,
-        industry: bv.industry,
-        preferred_response_length: bv.preferred_response_length,
-        language_dialect: bv.language_dialect,
-        example_responses: bv.example_responses,
-      });
-      setGeneratedTemplates(templates);
+    const gateRes = await fetch("/routes/ai_generate_routes", { method: "POST" });
+    if (!gateRes.ok) {
+      const body = await gateRes.json().catch(() => ({}));
+      setErrorMessage(body.error ?? "Too many generation requests. Please wait before generating again.");
       setIsGenerating(false);
+      return;
+    }
+
+    setTimeout(() => {
+      void (async () => {
+        const templates = generateMockTemplates({
+          id: bv.id,
+          business_name: bv.business_name,
+          tone: bv.tone,
+          key_phrases: bv.key_phrases,
+          phrases_to_avoid: bv.phrases_to_avoid,
+          signature_signoff: bv.signature_signoff,
+          target_audience: bv.target_audience,
+          brand_values: bv.brand_values,
+          industry: bv.industry,
+          preferred_response_length: bv.preferred_response_length,
+          language_dialect: bv.language_dialect,
+          example_responses: bv.example_responses,
+        });
+
+        // Auto-save: delete old templates for this location, then insert the 3 new ones
+        try {
+          const supabase = createClient();
+
+          // Delete existing saved templates for this location
+          const { error: deleteError } = await supabase
+            .from("saved_templates")
+            .delete()
+            .eq("user_id", userId)
+            .eq("location_id", selectedLocationId);
+
+          if (deleteError) throw new Error(deleteError.message);
+
+          // Insert the 3 new templates
+          const rows = templates.map((t) => ({
+            user_id: userId,
+            email: userEmail,
+            brand_voice_id: bv.id,
+            location_id: selectedLocationId,
+            title: t.title,
+            content: t.content,
+            review_type: t.review_type,
+          }));
+
+          const { error: insertError } = await supabase.from("saved_templates").insert(rows);
+          if (insertError) throw new Error(insertError.message);
+
+          const freshTemplates = await fetchSavedTemplates(userId);
+          setSavedTemplates(freshTemplates);
+          setSuccessMessage("Templates generated successfully!");
+          setTimeout(() => setSuccessMessage(null), 4000);
+        } catch (err) {
+          setErrorMessage(err instanceof Error ? err.message : "Failed to save generated templates.");
+          setTimeout(() => setErrorMessage(null), 4000);
+        }
+
+        setIsGenerating(false);
+      })();
     }, 1200);
-  }, [selectedLocationId, brandVoiceByLocationId]);
+  }, [selectedLocationId, userId, userEmail, brandVoiceByLocationId, fetchSavedTemplates]);
 
   const handleSaveTemplate = useCallback(
     async (template: GeneratedTemplate) => {
@@ -465,8 +511,11 @@ export default function TemplatesPage() {
         </div>
       )}
       {successMessage && (
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-          {successMessage}
+        <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 shadow-sm">
+          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-100">
+            <Check className="h-3.5 w-3.5 text-emerald-600" />
+          </div>
+          <span className="font-medium">{successMessage}</span>
         </div>
       )}
 
@@ -639,7 +688,7 @@ export default function TemplatesPage() {
                           ) : (
                             <Sparkles className="mr-2 h-3.5 w-3.5" />
                           )}
-                          Generate Template
+                          {templatesForSelected.length > 0 ? "Generate New Template" : "Generate Template"}
                         </Button>
                         <Button
                           variant="ghost"
