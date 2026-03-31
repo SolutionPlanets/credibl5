@@ -61,6 +61,9 @@ export async function POST(request: Request) {
       payment_currency: "USD",
       current_period_start: startDate.toISOString(),
       current_period_end: endDate.toISOString(),
+      total_ai_credits: 50,
+      ai_credits_used: 0,
+      ai_credits_refreshed_at: new Date().toISOString(),
     });
 
     if (insertError) {

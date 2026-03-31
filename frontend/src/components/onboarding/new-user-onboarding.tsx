@@ -208,7 +208,22 @@ export function NewUserOnboarding({
 
     // Mark onboarding as completed in the database
     try {
-      const res = await fetch("/routes/complete_onboarding_routes", { method: "POST" });
+      const res = await fetch("/routes/complete_onboarding_routes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyName: draft.companyName,
+          websiteUrl: draft.websiteUrl,
+          useCase: draft.useCase,
+          goals: draft.goals,
+          source: draft.source,
+          sourceOtherText: draft.sourceOtherText,
+          selectedPlan: draft.selectedPlan,
+          billingCycle: draft.billingCycle,
+          paymentCompleted: draft.paymentCompleted,
+          paidAmountCents: draft.paidAmountCents,
+        }),
+      });
       if (!res.ok) {
         setStepError("Failed to complete onboarding. Please try again.");
         setIsDashboardLoading(false);
