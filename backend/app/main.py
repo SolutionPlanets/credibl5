@@ -15,6 +15,8 @@ from app.auth_signup.router import router as auth_signup_router
 from app.payments.router import router as payments_router
 from app.templates.prompt import router as templates_router
 from app.routes.pricing import router as pricing_router
+from app.automation.router import router as automation_router
+from app.automation.cron import router as automation_cron_router
 from app.core.settings import Settings, get_settings
 from app.core.state_token import StateTokenError, sign_state, verify_state
 from app.core.supabase_gateway import SupabaseGateway
@@ -35,6 +37,8 @@ app.include_router(auth_signup_router, prefix="/auth", tags=["auth"])
 app.include_router(payments_router, prefix="/payments", tags=["payments"])
 app.include_router(templates_router, prefix="/templates", tags=["templates"])
 app.include_router(pricing_router, prefix="/pricing", tags=["pricing"])
+app.include_router(automation_router, prefix="/automation", tags=["automation"])
+app.include_router(automation_cron_router, prefix="/cron", tags=["cron"])
 
 app.add_middleware(
     CORSMiddleware,

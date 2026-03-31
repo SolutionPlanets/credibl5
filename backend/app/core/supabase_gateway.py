@@ -379,6 +379,185 @@ class SupabaseGateway:
         if patch_resp.status_code >= 400:
             raise HTTPException(status_code=500, detail=self._postgrest_error(patch_resp))
 
+    # -----------------------------------------------------------------------
+    # Auto-Reply Rules
+    # -----------------------------------------------------------------------
+
+    async def get_user_location_by_id(
+        self, user_id: str, location_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Alias for location ownership check used by automation."""
+        return await self.get_location_for_user_by_id(user_id, location_id)
+
+    async def list_auto_reply_rules(
+        self, user_id: str, location_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        url = f"{self.settings.supabase_url}/rest/v1/auto_reply_rules"
+        headers = self._service_headers()
+        params: Dict[str, str] = {
+            "select": "*",
+            "user_id": f"eq.{user_id}",
+            "order": "created_at.desc",
+        }
+        if location_id:
+            params["location_id"] = f"eq.{location_id}"
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return data if isinstance(data, list) else []
+
+    async def create_auto_reply_rule(self, rule_data: Dict[str, Any]) -> Dict[str, Any]:
+        url = f"{self.settings.supabase_url}/rest/v1/auto_reply_rules"
+        headers = self._service_headers(
+            {"Prefer": "return=representation", "Content-Type": "application/json"}
+        )
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, headers=headers, json=[rule_data])
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        if not data:
+            raise HTTPException(status_code=500, detail="Failed to create rule.")
+        return data[0]
+
+    async def update_auto_reply_rule(
+        self, rule_id: str, user_id: str, update_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        url = f"{self.settings.supabase_url}/rest/v1/auto_reply_rules"
+        headers = self._service_headers(
+            {"Prefer": "return=representation", "Content-Type": "application/json"}
+        )
+        params = {"id": f"eq.{rule_id}", "user_id": f"eq.{user_id}"}
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.patch(url, headers=headers, params=params, json=update_data)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return data[0] if data else None
+
+    async def delete_auto_reply_rule(
+        self, rule_id: str, user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        url = f"{self.settings.supabase_url}/rest/v1/auto_reply_rules"
+        headers = self._service_headers({"Prefer": "return=representation"})
+        params = {"id": f"eq.{rule_id}", "user_id": f"eq.{user_id}"}
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.delete(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        data = response.json()
+        return data[0] if data else None
+
+    async def get_automation_stats(self, user_id: str) -> Dict[str, Any]:
+        """Get automation summary: active rules, replies sent, credits consumed."""
+        headers = self._service_headers()
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        week_start = (now - __import__("datetime").timedelta(days=7)).isoformat()
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Active rules count
+            rules_resp = await client.get(
+                f"{self.settings.supabase_url}/rest/v1/auto_reply_rules",
+                headers=headers,
+                params={
+                    "select": "id",
+                    "user_id": f"eq.{user_id}",
+                    "is_active": "eq.true",
+                },
+            )
+            # Replies today
+            today_resp = await client.get(
+                f"{self.settings.supabase_url}/rest/v1/auto_reply_logs",
+                headers=headers,
+                params={
+                    "select": "id",
+                    "user_id": f"eq.{user_id}",
+                    "action": "eq.replied",
+                    "created_at": f"gte.{today_start}",
+                },
+            )
+            # Replies this week
+            week_resp = await client.get(
+                f"{self.settings.supabase_url}/rest/v1/auto_reply_logs",
+                headers=headers,
+                params={
+                    "select": "id",
+                    "user_id": f"eq.{user_id}",
+                    "action": "eq.replied",
+                    "created_at": f"gte.{week_start}",
+                },
+            )
+            # Automation credits used this period
+            credits_resp = await client.get(
+                f"{self.settings.supabase_url}/rest/v1/ai_usage_logs",
+                headers=headers,
+                params={
+                    "select": "credits_used",
+                    "organization_id": f"eq.{user_id}",
+                    "action_type": "eq.auto_reply_draft",
+                },
+            )
+
+        active_rules = len(rules_resp.json()) if rules_resp.status_code < 400 else 0
+        replies_today = len(today_resp.json()) if today_resp.status_code < 400 else 0
+        replies_this_week = len(week_resp.json()) if week_resp.status_code < 400 else 0
+
+        credits_data = credits_resp.json() if credits_resp.status_code < 400 else []
+        automation_credits_used = sum(
+            row.get("credits_used", 0) for row in credits_data
+        ) if isinstance(credits_data, list) else 0
+
+        return {
+            "active_rules": active_rules,
+            "replies_today": replies_today,
+            "replies_this_week": replies_this_week,
+            "automation_credits_used": automation_credits_used,
+        }
+
+    async def get_automation_logs(
+        self, user_id: str, page: int = 1, limit: int = 20
+    ) -> Dict[str, Any]:
+        """Get paginated automation activity logs."""
+        url = f"{self.settings.supabase_url}/rest/v1/auto_reply_logs"
+        headers = self._service_headers({"Prefer": "count=exact"})
+        offset = (page - 1) * limit
+        params: Dict[str, str] = {
+            "select": "*",
+            "user_id": f"eq.{user_id}",
+            "order": "created_at.desc",
+            "offset": str(offset),
+            "limit": str(limit),
+        }
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+
+        data = response.json()
+        # Extract total count from Content-Range header
+        content_range = response.headers.get("content-range", "")
+        total = 0
+        if "/" in content_range:
+            try:
+                total = int(content_range.split("/")[-1])
+            except ValueError:
+                total = len(data) if isinstance(data, list) else 0
+
+        return {
+            "logs": data if isinstance(data, list) else [],
+            "page": page,
+            "limit": limit,
+            "total": total,
+        }
+
     async def _get_profile_google_connected_at(self, user_id: str) -> Optional[str]:
         profile_url = f"{self.settings.supabase_url}/rest/v1/user_profiles"
         headers = self._service_headers()

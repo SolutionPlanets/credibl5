@@ -10,15 +10,15 @@ REVIEWS_BASE_V4 = "https://mybusiness.googleapis.com/v4"
 
 # OAuth Credentials from .env
 import os
-CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
-CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+CLIENT_ID = os.getenv("GMB_CLIENT_ID", "your-client-id-here")
+CLIENT_SECRET = os.getenv("GMB_CLIENT_SECRET", "your-client-secret-here")
 
 # Use these IDs as they are confirmed to be the correct GMB ones from your logs
-DEFAULT_ACCOUNT_ID = os.environ.get("account_id", "")
-DEFAULT_LOCATION_ID = os.environ.get("location_id", "")
+DEFAULT_ACCOUNT_ID = "104690922755529726751"
+DEFAULT_LOCATION_ID = "2859400714063434514"
 
-# Your provided Refresh Token
-refresh_token = os.environ.get("refresh_token", "")
+# Read refresh token from environment only (no hardcoded secret fallback)
+refresh_token = os.getenv("GMB_REFRESH_TOKEN", "")
 
 async def get_fresh_access_token(rt):
     print(f"--- Exchanging Refresh Token for Access Token ---")

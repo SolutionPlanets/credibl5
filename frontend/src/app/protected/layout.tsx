@@ -129,7 +129,7 @@ export default function ProtectedLayout({
       const [profileRes, locationsRes, subscriptionRes] = await Promise.all([
         supabase
           .from("user_profiles")
-          .select("google_connected_at, ai_credits")
+          .select("google_connected_at")
           .eq("id", user.id)
           .maybeSingle(),
         supabase
@@ -139,7 +139,7 @@ export default function ProtectedLayout({
           .order("created_at", { ascending: false }),
         supabase
           .from("subscription_plans")
-          .select("total_ai_credits")
+          .select("total_ai_credits,ai_credits_used,remaining_ai_credits")
           .eq("user_id", user.id)
           .maybeSingle(),
       ]);
@@ -176,15 +176,18 @@ export default function ProtectedLayout({
       setIsGoogleConnected(googleConnected);
       setLocations(locationsRes.data || []);
       const total = subscriptionRes.data?.total_ai_credits ?? 0;
-      const used = profileRes.data?.ai_credits ?? 0;
+      const used = subscriptionRes.data?.ai_credits_used ?? 0;
+      const remaining = subscriptionRes.data?.remaining_ai_credits;
       setTotalCredits(total);
-      setRemainingCredits(Math.max(total - used, 0));
+      setRemainingCredits(
+        typeof remaining === "number" ? Math.max(remaining, 0) : Math.max(total - used, 0)
+      );
       setLoading(false);
 
       // Fetch unread review notifications
       fetchNotifications(supabase);
 
-      // Realtime: watch credit changes on both tables
+      // Realtime: watch credit changes from subscription_plans
       creditsChannel = supabase
         .channel("user_credits_" + user.id)
         .on(
@@ -196,25 +199,17 @@ export default function ProtectedLayout({
             filter: `user_id=eq.${user.id}`,
           },
           (payload: any) => {
-            if (payload.new?.total_ai_credits !== undefined)
-              setTotalCredits(payload.new.total_ai_credits);
-          }
-        )
-        .on(
-          "postgres_changes",
-          {
-            event: "UPDATE",
-            schema: "public",
-            table: "user_profiles",
-            filter: `id=eq.${user.id}`,
-          },
-          (payload: any) => {
-            if (payload.new?.ai_credits !== undefined) {
-              const used = payload.new.ai_credits;
-              setTotalCredits((prevTotal) => {
-                setRemainingCredits(Math.max((prevTotal ?? 0) - used, 0));
-                return prevTotal;
-              });
+            const nextTotal = payload.new?.total_ai_credits;
+            const nextRemaining = payload.new?.remaining_ai_credits;
+            const nextUsed = payload.new?.ai_credits_used;
+
+            if (typeof nextTotal === "number") {
+              setTotalCredits(nextTotal);
+            }
+            if (typeof nextRemaining === "number") {
+              setRemainingCredits(Math.max(nextRemaining, 0));
+            } else if (typeof nextTotal === "number" && typeof nextUsed === "number") {
+              setRemainingCredits(Math.max(nextTotal - nextUsed, 0));
             }
           }
         )
@@ -249,7 +244,7 @@ export default function ProtectedLayout({
   };
 
   const handleMarkAllRead = () => {
-    // Optimistic clear — backend write requires service_role; navigate to inbox to action
+    // Optimistic clear - backend write requires service_role; navigate to inbox to action
     setUnreadCount(0);
     setNotifications([]);
   };
@@ -307,7 +302,7 @@ export default function ProtectedLayout({
             title: r.reviewer_name || "Anonymous",
             subtitle:
               r.review_text?.length > 60
-                ? r.review_text.substring(0, 60) + "…"
+                ? r.review_text.substring(0, 60) + "..."
                 : r.review_text || "",
             href: `/protected/inbox?locationId=${r.location_id}`,
             rating: r.star_rating,
@@ -335,7 +330,7 @@ export default function ProtectedLayout({
     try {
       const supabase = createClient();
 
-      // First, re-check backend status — maybe already connected but stale UI
+      // First, re-check backend status - maybe already connected but stale UI
       const backendUrl = process.env.NEXT_PUBLIC_GMB_BACKEND_URL?.trim()?.replace(/\/+$/, "");
       if (backendUrl) {
         const { data: { session } } = await supabase.auth.getSession();
@@ -354,7 +349,7 @@ export default function ProtectedLayout({
         }
       }
 
-      // Not connected — trigger OAuth flow
+      // Not connected - trigger OAuth flow
       await startGoogleConnectFlow({
         supabase,
         nextPath: "/protected",
@@ -367,7 +362,7 @@ export default function ProtectedLayout({
   }, []);
 
   // ---------------------------------------------------------------------------
-  // Derived display values — must be before any early return (Rules of Hooks)
+  // Derived display values - must be before any early return (Rules of Hooks)
   // ---------------------------------------------------------------------------
   const selectedLocationId = searchParams.get("locationId");
   const selectedLocationName = React.useMemo(() => {
@@ -395,7 +390,24 @@ export default function ProtectedLayout({
   const creditsPct = !creditsLoading && totalCredits! > 0
     ? Math.round((remainingCredits! / totalCredits!) * 100)
     : 0;
-  const creditsLabel = creditsLoading ? "…" : remainingCredits!.toLocaleString();
+  const creditsLabel = creditsLoading ? "..." : remainingCredits!.toLocaleString();
+  const totalCreditsLabel = creditsLoading ? "..." : totalCredits!.toLocaleString();
+  const creditsTone =
+    creditsLoading
+      ? "border-slate-200 bg-slate-50 text-slate-600"
+      : creditsPct <= 20
+        ? "border-rose-200 bg-rose-50 text-rose-700"
+        : creditsPct <= 50
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-indigo-200 bg-indigo-50 text-indigo-700";
+  const creditsBarTone =
+    creditsLoading
+      ? "bg-slate-400"
+      : creditsPct <= 20
+        ? "bg-rose-500"
+        : creditsPct <= 50
+          ? "bg-amber-500"
+          : "bg-indigo-500";
 
   // ---------------------------------------------------------------------------
   // JSX
@@ -416,28 +428,28 @@ export default function ProtectedLayout({
           {/* ================================================================
               TOP HEADER
           ================================================================ */}
-          <header className="h-16 flex-shrink-0 bg-white/90 backdrop-blur-md border-b border-slate-200/80 px-3 sm:px-5 flex items-center justify-between z-30 shadow-sm">
+          <header className="z-30 flex h-20 flex-shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/95 px-3 shadow-[0_1px_0_rgba(15,23,42,0.04)] backdrop-blur-xl sm:px-5 lg:px-6">
 
             {/* ---- LEFT: hamburger + search + location picker ---- */}
-            <div className="flex items-center flex-1 gap-2 min-w-0">
+            <div className="flex h-full min-w-0 flex-1 items-center gap-2.5">
               {/* Mobile sidebar toggle */}
               <button
                 onClick={() => setIsSidebarOpen(true)}
-                className="lg:hidden p-2 -ml-1 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 transition-colors rounded-lg"
+                className="lg:hidden -ml-0.5 rounded-xl border border-slate-200 p-2 text-slate-500 transition-colors hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-600"
               >
                 <Menu className="h-5 w-5" />
               </button>
 
               {/* Search bar */}
-              <div ref={searchRef} className="relative flex-1 max-w-sm hidden sm:block">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none" />
+              <div ref={searchRef} className="relative hidden max-w-[520px] flex-1 sm:block">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 <input
                   type="search"
                   value={searchQuery}
                   onChange={(e) => handleSearch(e.target.value)}
                   onFocus={() => searchQuery && setIsSearchOpen(true)}
-                  placeholder="Search reviews, locations…"
-                  className="w-full h-9 pl-9 pr-8 bg-slate-100/80 border border-transparent focus:border-indigo-300 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 rounded-xl text-sm text-slate-700 placeholder:text-slate-400 transition-all"
+                  placeholder="Search reviews, locations..."
+                  className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50/80 pl-11 pr-9 text-sm text-slate-700 transition-all placeholder:text-slate-400 focus:border-indigo-300 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                 />
                 {searchQuery && (
                   <button
@@ -446,7 +458,7 @@ export default function ProtectedLayout({
                       setSearchResults([]);
                       setIsSearchOpen(false);
                     }}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
@@ -454,11 +466,11 @@ export default function ProtectedLayout({
 
                 {/* Search results dropdown */}
                 {isSearchOpen && (
-                  <div className="absolute top-11 left-0 right-0 bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden z-50">
+                  <div className="absolute left-0 right-0 top-12 z-50 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
                     {isSearching ? (
                       <div className="p-4 text-center text-sm text-slate-500 flex items-center justify-center gap-2">
                         <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
-                        Searching…
+                        Searching...
                       </div>
                     ) : searchResults.length === 0 ? (
                       <p className="p-4 text-center text-sm text-slate-500">
@@ -522,7 +534,7 @@ export default function ProtectedLayout({
                                       <p className="text-sm font-semibold text-slate-800 truncate">{result.title}</p>
                                       {result.rating !== undefined && (
                                         <span className="text-xs text-amber-500 shrink-0">
-                                          {"★".repeat(result.rating)}{"☆".repeat(5 - result.rating)}
+                                          {result.rating}/5
                                         </span>
                                       )}
                                     </div>
@@ -542,17 +554,17 @@ export default function ProtectedLayout({
               <div ref={locationsRef} className="relative hidden sm:block">
                 <button
                   onClick={() => setIsLocationsOpen(!isLocationsOpen)}
-                  className="flex items-center gap-1.5 h-9 px-3 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-700 hover:border-indigo-300 hover:bg-indigo-50/40 transition-all"
+                  className="flex h-11 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-700 transition-all hover:border-indigo-300 hover:bg-indigo-50/30"
                 >
                   <MapPin className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
-                  <span className="truncate max-w-[130px]">{selectedLocationName}</span>
+                  <span className="max-w-[150px] truncate">{selectedLocationName}</span>
                   <ChevronDown
                     className={`h-3.5 w-3.5 text-slate-400 shrink-0 transition-transform ${isLocationsOpen ? "rotate-180" : ""}`}
                   />
                 </button>
 
                 {isLocationsOpen && (
-                  <div className="absolute top-11 left-0 w-72 bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden z-50">
+                  <div className="absolute left-0 top-12 z-50 w-72 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
                     <div className="px-4 py-3 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
                       <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
                         Your Locations
@@ -614,36 +626,33 @@ export default function ProtectedLayout({
             </div>
 
             {/* ---- RIGHT: credits + notifications + help + profile ---- */}
-            <div className="flex items-center gap-1 sm:gap-1.5 pl-2">
+            <div className="flex items-center gap-1.5 pl-2 sm:gap-2">
 
-              {/* AI Credits badge — links to settings/billing */}
+              {/* AI Credits badge - links to settings/billing */}
               <button
                 onClick={() => router.push("/protected/settings")}
-                title={`${creditsLabel} of ${creditsLoading ? "…" : totalCredits!.toLocaleString()} credits remaining`}
-                className="hidden md:flex flex-col items-start gap-0.5 px-3 py-1.5 bg-gradient-to-r from-violet-50 to-indigo-50 hover:from-violet-100 hover:to-indigo-100 rounded-xl border border-indigo-200/60 transition-all group min-w-[110px]"
+                title={`${creditsLabel} of ${totalCreditsLabel} credits remaining`}
+                className={`hidden min-w-[170px] rounded-2xl border px-3 py-2 transition-all hover:shadow-sm md:flex ${creditsTone}`}
               >
-                <div className="flex items-center gap-1.5 w-full">
-                  <Sparkles className="h-3 w-3 text-violet-500 group-hover:text-violet-600 shrink-0" />
-                  <span className="text-xs font-bold text-indigo-700">{creditsLabel}</span>
-                  <span className="text-[10px] font-medium text-indigo-400 ml-auto">
-                    /{creditsLoading ? "…" : totalCredits!.toLocaleString()}
-                  </span>
+                <div className="flex w-full items-center gap-2">
+                  <div className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-white/80">
+                    <Sparkles className="h-3.5 w-3.5" />
+                  </div>
+                  <div className="min-w-0 flex-1 text-left">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] opacity-80">AI Credits</p>
+                    <p className="truncate text-xs font-semibold">
+                      {creditsLabel} <span className="font-normal opacity-70">/ {totalCreditsLabel}</span>
+                    </p>
+                  </div>
+                  <span className="text-[11px] font-bold">{creditsPct}%</span>
                 </div>
-                {/* Progress bar */}
-                <div className="w-full h-1 bg-indigo-100 rounded-full overflow-hidden">
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/70">
                   <div
-                    className={`h-full rounded-full transition-all ${
-                      creditsPct > 50
-                        ? "bg-indigo-500"
-                        : creditsPct > 20
-                        ? "bg-amber-400"
-                        : "bg-red-400"
-                    }`}
+                    className={`h-full rounded-full transition-all ${creditsBarTone}`}
                     style={{ width: `${creditsPct}%` }}
                   />
                 </div>
               </button>
-
               {/* Notifications */}
               <div ref={notificationsRef} className="relative">
                 <button
@@ -652,7 +661,7 @@ export default function ProtectedLayout({
                     setIsHelpOpen(false);
                     setIsProfileOpen(false);
                   }}
-                  className="relative h-9 w-9 flex items-center justify-center rounded-xl text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                  className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition-colors hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-600"
                 >
                   <Bell className="h-5 w-5" />
                   {unreadCount > 0 && (
@@ -663,7 +672,7 @@ export default function ProtectedLayout({
                 </button>
 
                 {isNotificationsOpen && (
-                  <div className="absolute top-11 right-0 w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden z-50">
+                  <div className="absolute top-12 right-0 w-80 bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden z-50">
                     <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
                       <div>
                         <p className="text-sm font-bold text-slate-800">Notifications</p>
@@ -734,7 +743,7 @@ export default function ProtectedLayout({
                         }}
                         className="w-full text-center text-xs font-semibold text-indigo-600 hover:text-indigo-700 py-1 transition-colors"
                       >
-                        View all in Inbox →
+                        View all in Inbox
                       </button>
                     </div>
                   </div>
@@ -749,13 +758,13 @@ export default function ProtectedLayout({
                     setIsNotificationsOpen(false);
                     setIsProfileOpen(false);
                   }}
-                  className="h-9 w-9 flex items-center justify-center rounded-xl text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition-colors hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-600"
                 >
                   <HelpCircle className="h-5 w-5" />
                 </button>
 
                 {isHelpOpen && (
-                  <div className="absolute top-11 right-0 w-72 bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden z-50">
+                  <div className="absolute top-12 right-0 w-72 bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden z-50">
                     <div className="px-4 py-3 border-b border-slate-100 bg-gradient-to-r from-indigo-50 to-violet-50">
                       <p className="text-sm font-bold text-slate-800">Help & Resources</p>
                       <p className="text-xs text-slate-500 mt-0.5">Guides, tips, and support</p>
@@ -820,7 +829,7 @@ export default function ProtectedLayout({
                 )}
               </div>
 
-              <div className="h-8 w-px bg-slate-200 mx-0.5 hidden sm:block" />
+              <div className="mx-0.5 hidden h-8 w-px bg-slate-200 sm:block" />
 
               {/* User profile dropdown */}
               <div ref={profileRef} className="relative">
@@ -830,7 +839,7 @@ export default function ProtectedLayout({
                     setIsNotificationsOpen(false);
                     setIsHelpOpen(false);
                   }}
-                  className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-xl hover:bg-slate-100 transition-colors"
+                  className="flex items-center gap-2 rounded-2xl border border-transparent py-1 pl-1 pr-2 transition-colors hover:border-slate-200 hover:bg-slate-100"
                 >
                   <div className="hidden sm:block text-right">
                     <p className="text-sm font-bold text-slate-900 leading-none">
@@ -876,7 +885,7 @@ export default function ProtectedLayout({
                           <span className="text-xs font-bold text-indigo-700">
                             {creditsLabel}
                             <span className="font-normal text-indigo-400">
-                              /{creditsLoading ? "…" : totalCredits!.toLocaleString()}
+                              /{totalCreditsLabel}
                             </span>
                           </span>
                         </div>

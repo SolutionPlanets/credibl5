@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     pricing_sheet_id: str | None = Field(default=None, alias="PRICING_SHEET_ID")
     google_service_account_file: str | None = Field(default=None, alias="GOOGLE_SERVICE_ACCOUNT_FILE")
 
+    google_gemini_api_key: str | None = Field(default=None, alias="GOOGLE_GEMINI_API_KEY")
+    cron_secret: str = Field(default="dev-only-change-this-secret", alias="CRON_SECRET")
+
     @property
     def service_role_key(self) -> str:
         service_key = self.supabase_service_role_key or self.next_public_supabase_service_key
