@@ -45,7 +45,9 @@ class Settings(BaseSettings):
 
     google_gemini_api_key: str | None = Field(default=None, alias="GOOGLE_GEMINI_API_KEY")
     vite_google_ai_api_key: str | None = Field(default=None, alias="VITE_GOOGLE_AI_API_KEY")
+    gemini_model_name: str = Field(default="gemini-2.5-flash-lite", alias="GEMINI_MODEL_NAME")
     cron_secret: str = Field(default="dev-only-change-this-secret", alias="CRON_SECRET")
+    allow_insecure_cron: bool = Field(default=False, alias="ALLOW_INSECURE_CRON")
 
     @property
     def gemini_api_key(self) -> str | None:

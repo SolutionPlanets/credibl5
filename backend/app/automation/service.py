@@ -46,33 +46,34 @@ async def process_auto_replies_job(settings: Settings) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers=headers, params=params)
 
-    if resp.status_code >= 400:
-        logger.error("[AutoReply] Failed to fetch active rules: %s", resp.text[:300])
-        return {"error": "Failed to fetch rules"}
+        if resp.status_code >= 400:
+            logger.error("[AutoReply] Failed to fetch active rules: %s", resp.text[:300])
+            return {"error": "Failed to fetch rules"}
 
-    active_rules = resp.json()
-    if not active_rules:
-        logger.info("[AutoReply] No active rules found.")
-        return {"processed": 0, "rules_active": 0}
+        active_rules = resp.json()
+        if not active_rules:
+            logger.info("[AutoReply] No active rules found.")
+            return {"processed": 0, "rules_active": 0}
 
-    logger.info("[AutoReply] Found %d active rules.", len(active_rules))
+        logger.info("[AutoReply] Found %d active rules.", len(active_rules))
 
-    processed = 0
-    for rule in active_rules:
-        try:
-            count = await _process_rule(settings, gateway, oauth, rule)
-            processed += count
-        except Exception as e:
-            logger.error("[AutoReply] Error processing rule %s: %s", rule.get("id", "?"), e)
-            await _log_auto_reply(
-                settings,
-                user_id=rule["user_id"],
-                rule_id=rule["id"],
-                location_id=rule.get("location_id"),
-                rule_name=rule.get("name"),
-                action="skipped_error",
-                error_message=str(e),
-            )
+        processed = 0
+        for rule in active_rules:
+            try:
+                count = await _process_rule(settings, gateway, oauth, rule, client)
+                processed += count
+            except Exception as e:
+                logger.error("[AutoReply] Error processing rule %s: %s", rule.get("id", "?"), e)
+                await _log_auto_reply(
+                    settings,
+                    user_id=rule["user_id"],
+                    rule_id=rule["id"],
+                    location_id=rule.get("location_id"),
+                    rule_name=rule.get("name"),
+                    action="skipped_error",
+                    error_message=str(e),
+                    client=client,
+                )
 
     return {"processed": processed, "rules_active": len(active_rules)}
 
@@ -86,6 +87,7 @@ async def _process_rule(
     gateway: SupabaseGateway,
     oauth: GoogleOAuthService,
     rule: Dict[str, Any],
+    http_client: httpx.AsyncClient,
 ) -> int:
     """Process a single rule: find matching reviews, generate and post replies. Returns count of replies sent."""
     user_id = rule["user_id"]
@@ -106,6 +108,7 @@ async def _process_rule(
                 rule_name=rule.get("name"),
                 action="skipped_no_credits",
                 error_message="AI credits exhausted.",
+                client=http_client,
             )
             return 0
 
@@ -123,8 +126,7 @@ async def _process_rule(
         "limit": "50",
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        reviews_resp = await client.get(reviews_url, headers=headers, params=reviews_params)
+    reviews_resp = await http_client.get(reviews_url, headers=headers, params=reviews_params)
 
     if reviews_resp.status_code >= 400:
         logger.error("[AutoReply] Failed to fetch reviews for location %s: %s", location_id, reviews_resp.text[:200])
@@ -149,7 +151,7 @@ async def _process_rule(
                 break
 
         try:
-            success = await _execute_reply(settings, gateway, oauth, rule, review)
+            success = await _execute_reply(settings, gateway, oauth, rule, review, http_client)
             if success:
                 reply_count += 1
         except Exception as e:
@@ -163,6 +165,7 @@ async def _process_rule(
                 rule_name=rule.get("name"),
                 action="skipped_error",
                 error_message=str(e),
+                client=http_client,
             )
 
     return reply_count
@@ -216,6 +219,7 @@ async def _execute_reply(
     oauth: GoogleOAuthService,
     rule: Dict[str, Any],
     review: Dict[str, Any],
+    http_client: httpx.AsyncClient,
 ) -> bool:
     """Generate and post a reply. Returns True on success."""
     user_id = rule["user_id"]
@@ -248,15 +252,29 @@ async def _execute_reply(
                 rule_name=rule.get("name"),
                 action="skipped_escalation",
                 error_message=escalation.reason,
+                client=http_client,
             )
             return False
 
     # Generate reply text
     reply_text = ""
     if response_settings.get("type") == "template" and response_settings.get("template_id"):
-        reply_text = await _get_template_reply(settings, response_settings["template_id"], review, business_name)
+        reply_text = await _get_template_reply(
+            settings,
+            response_settings["template_id"],
+            review,
+            business_name,
+            http_client,
+        )
     else:
-        reply_text = await _generate_ai_reply(settings, gateway, rule, review, business_name)
+        reply_text = await _generate_ai_reply(
+            settings,
+            gateway,
+            rule,
+            review,
+            business_name,
+            http_client,
+        )
 
     if not reply_text:
         logger.warning("[AutoReply] Empty reply generated for review %s", review.get("id", "?"))
@@ -308,6 +326,7 @@ async def _execute_reply(
             action="skipped_error",
             reply_text=reply_text,
             error_message=str(e),
+            client=http_client,
         )
         return False
 
@@ -318,17 +337,16 @@ async def _execute_reply(
         "Content-Type": "application/json",
     }
     review_update_url = f"{settings.supabase_url}/rest/v1/reviews"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        await client.patch(
-            review_update_url,
-            headers=headers,
-            params={"id": f"eq.{review['id']}"},
-            json={
-                "review_reply": reply_text,
-                "reply_source": "auto_rule",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+    await http_client.patch(
+        review_update_url,
+        headers=headers,
+        params={"id": f"eq.{review['id']}"},
+        json={
+            "review_reply": reply_text,
+            "reply_source": "auto_rule",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
     # Track AI credit usage (only for AI-generated replies)
     if response_settings.get("type", "ai") == "ai":
@@ -348,6 +366,7 @@ async def _execute_reply(
         action="replied",
         reply_text=reply_text,
         credits_consumed=1 if response_settings.get("type", "ai") == "ai" else 0,
+        client=http_client,
     )
 
     logger.info("[AutoReply] Successfully replied to review %s via rule '%s'", review.get("id", "?"), rule.get("name"))
@@ -363,6 +382,7 @@ async def _get_template_reply(
     template_id: str,
     review: Dict[str, Any],
     business_name: str,
+    http_client: httpx.AsyncClient,
 ) -> str:
     """Fetch template content and substitute placeholders."""
     headers = {
@@ -372,8 +392,7 @@ async def _get_template_reply(
     url = f"{settings.supabase_url}/rest/v1/saved_templates"
     params = {"select": "content", "id": f"eq.{template_id}", "limit": "1"}
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url, headers=headers, params=params)
+    resp = await http_client.get(url, headers=headers, params=params)
 
     if resp.status_code >= 400 or not resp.json():
         return ""
@@ -391,6 +410,7 @@ async def _generate_ai_reply(
     rule: Dict[str, Any],
     review: Dict[str, Any],
     business_name: str,
+    http_client: httpx.AsyncClient,
 ) -> str:
     """Generate a review reply using Google Gemini with brand voice context."""
     api_key = settings.gemini_api_key
@@ -401,12 +421,12 @@ async def _generate_ai_reply(
     # Lazy import to avoid startup cost
     from google import genai
 
-    client = genai.Client(api_key=api_key)
+    genai_client = genai.Client(api_key=api_key)
 
     # Fetch brand voice for this location
     location_id = rule["location_id"]
     user_id = rule["user_id"]
-    bv = await _fetch_brand_voice(settings, user_id, location_id)
+    bv = await _fetch_brand_voice(settings, user_id, location_id, http_client)
 
     response_settings = rule.get("response_settings", {})
     custom_instructions = response_settings.get("custom_instructions", "")
@@ -427,8 +447,8 @@ async def _generate_ai_reply(
     )
 
     try:
-        result = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+        result = genai_client.models.generate_content(
+            model=settings.gemini_model_name,
             contents=prompt,
         )
         raw_output = result.text.strip()
@@ -452,7 +472,10 @@ async def _generate_ai_reply(
 
 
 async def _fetch_brand_voice(
-    settings: Settings, user_id: str, location_id: str
+    settings: Settings,
+    user_id: str,
+    location_id: str,
+    http_client: httpx.AsyncClient,
 ) -> Dict[str, Any]:
     """Fetch brand voice settings for a location."""
     headers = {
@@ -467,8 +490,7 @@ async def _fetch_brand_voice(
         "limit": "1",
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url, headers=headers, params=params)
+    resp = await http_client.get(url, headers=headers, params=params)
 
     if resp.status_code < 400 and resp.json():
         return resp.json()[0]
@@ -506,7 +528,7 @@ async def _track_credit_usage(
         review_id=review.get("gmb_review_id") if review else review_id,
         review_response_id=str(uuid.uuid4()),
         reviewer_name=review.get("reviewer_name") if review else None,
-        model_name="gemini-2.5-flash-lite",
+        model_name=settings.gemini_model_name,
         request_meta=meta,
     )
 
@@ -520,6 +542,7 @@ async def _log_auto_reply(
     user_id: str,
     rule_id: str,
     location_id: Optional[str],
+    client: httpx.AsyncClient,
     rule_name: Optional[str] = None,
     review_id: Optional[str] = None,
     action: str = "replied",
@@ -546,11 +569,10 @@ async def _log_auto_reply(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            await client.post(
-                f"{settings.supabase_url}/rest/v1/auto_reply_logs",
-                headers=headers,
-                json=[payload],
-            )
+        await client.post(
+            f"{settings.supabase_url}/rest/v1/auto_reply_logs",
+            headers=headers,
+            json=[payload],
+        )
     except Exception as e:
         logger.error("[AutoReply] Failed to insert log: %s", e)

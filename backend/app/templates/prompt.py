@@ -9,14 +9,14 @@ POST /templates/generate
 
 from __future__ import annotations
 
-import os
 import json
 from typing import List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.deps import get_bearer_token, get_supabase_gateway, require_ai_credits, AI_CREDIT_COSTS
+from app.core.deps import get_app_settings, get_supabase_gateway, require_ai_credits, AI_CREDIT_COSTS
+from app.core.settings import Settings
 from app.core.supabase_gateway import SupabaseGateway
 
 
@@ -202,6 +202,7 @@ async def generate_templates(
     body: TemplateGenerateRequest,
     credit_check: dict = Depends(require_ai_credits(AI_CREDIT_COSTS["template_generation"])),
     gateway: SupabaseGateway = Depends(get_supabase_gateway),
+    settings: Settings = Depends(get_app_settings),
 ) -> TemplateGenerateResponse:
     """
     Generate 3 review response templates (positive / negative / neutral)
@@ -210,10 +211,7 @@ async def generate_templates(
     """
     user = credit_check["user"]
 
-    api_key = (
-        os.environ.get("GOOGLE_GEMINI_API_KEY")
-        or os.environ.get("VITE_GOOGLE_AI_API_KEY")
-    )
+    api_key = settings.gemini_api_key
     if not api_key:
         raise HTTPException(
             status_code=500,
@@ -234,7 +232,7 @@ async def generate_templates(
 
     try:
         result = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model=settings.gemini_model_name,
             contents=prompt,
         )
         templates = _parse_gemini_response(result.text)
@@ -261,7 +259,7 @@ async def generate_templates(
         user_id=user.id,
         action_type="template_generation",
         credits_used=AI_CREDIT_COSTS["template_generation"],
-        model_name="gemini-2.5-flash-lite",
+        model_name=settings.gemini_model_name,
         request_meta={"source": "template_generate", "templates_count": len(templates)},
     )
 

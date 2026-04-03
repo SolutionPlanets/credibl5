@@ -3,6 +3,8 @@ import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { rateLimit } from "@/lib/rate-limit";
 
 const limiter = rateLimit({ interval: 60_000, limit: 10 });
+const AI_MODEL_NAME =
+  process.env.GEMINI_MODEL_NAME ?? process.env.AI_MODEL_NAME ?? "gemini-2.5-flash-lite";
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -58,7 +60,7 @@ export async function POST(request: Request) {
   adminClient.from("ai_usage_logs").insert({
     organization_id: user.id,
     location_id: locationId,
-    model_name: "template-generator",
+    model_name: AI_MODEL_NAME,
     action_type: "template_generation",
     credits_used: 1,
     request_meta_json: { source: "template_generate" },

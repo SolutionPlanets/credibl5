@@ -381,7 +381,7 @@ class SupabaseGateway:
         review_id: Optional[str] = None,
         review_response_id: Optional[str] = None,
         reviewer_name: Optional[str] = None,
-        model_name: str = "gemini-2.5-flash-lite",
+        model_name: Optional[str] = None,
         request_meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Insert a row into ai_usage_logs to track credit consumption.
@@ -397,7 +397,7 @@ class SupabaseGateway:
             "review_id": review_id,
             "review_response_id": review_response_id,
             "reviewer_name": reviewer_name,
-            "model_name": model_name,
+            "model_name": model_name or self.settings.gemini_model_name,
             "action_type": action_type,
             "credits_used": credits_used,
             "request_meta_json": request_meta,

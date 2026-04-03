@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Optional, Tuple
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -855,8 +857,6 @@ async def _fetch_brand_voice_for_location(
     location_id: str,
 ) -> Dict[str, Any]:
     """Fetch brand voice settings for a location using service role."""
-    import httpx as _httpx
-
     headers = {
         "apikey": settings.service_role_key,
         "Authorization": f"Bearer {settings.service_role_key}",
@@ -869,7 +869,7 @@ async def _fetch_brand_voice_for_location(
         "limit": "1",
     }
 
-    async with _httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers=headers, params=params)
 
     if resp.status_code < 400 and resp.json():
@@ -958,7 +958,7 @@ async def bulk_ai_generate(
             )
 
             result = client.models.generate_content(
-                model="gemini-2.5-flash-lite",
+                model=settings.gemini_model_name,
                 contents=prompt,
             )
             raw_output = result.text.strip()
@@ -993,7 +993,7 @@ async def bulk_ai_generate(
                 review_id=item.gmbReviewId,
                 review_response_id=str(uuid.uuid4()),
                 reviewer_name=item.reviewerName,
-                model_name="gemini-2.5-flash-lite",
+                model_name=settings.gemini_model_name,
                 request_meta={
                     "source": "bulk_ai_generate",
                     "generated_reply": reply,
@@ -1131,7 +1131,7 @@ async def single_ai_generate_reply(
 
     try:
         result = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model=settings.gemini_model_name,
             contents=prompt,
         )
         raw_output = result.text.strip()
@@ -1165,7 +1165,7 @@ async def single_ai_generate_reply(
         review_id=body.gmbReviewId,
         review_response_id=str(uuid.uuid4()),
         reviewer_name=body.reviewerName,
-        model_name="gemini-2.5-flash-lite",
+        model_name=settings.gemini_model_name,
         request_meta={
             "source": "single_ai_generate",
             "generated_reply": reply,

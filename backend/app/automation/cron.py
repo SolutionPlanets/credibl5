@@ -6,16 +6,18 @@ Secured by CRON_SECRET header verification.
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
+from app.automation.service import process_auto_replies_job
 from app.core.deps import get_app_settings
 from app.core.settings import Settings
-from app.automation.service import process_auto_replies_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_INSECURE_CRON_SECRET = "dev-only-change-this-secret"
 
 
 def _verify_cron_secret(
@@ -23,16 +25,18 @@ def _verify_cron_secret(
     authorization: str | None = Header(None),
 ) -> None:
     """Verify the request comes from a trusted cron source."""
-    expected = settings.cron_secret
-    if not expected or expected == "dev-only-change-this-secret":
-        logger.warning("[Cron] CRON_SECRET not configured — allowing request in dev mode.")
-        return
+    expected = (settings.cron_secret or "").strip()
+    if not expected or expected == _INSECURE_CRON_SECRET:
+        if settings.allow_insecure_cron:
+            logger.warning("[Cron] Insecure cron auth is enabled via ALLOW_INSECURE_CRON=true.")
+            return
+        raise HTTPException(status_code=503, detail="CRON_SECRET is not configured securely.")
 
     token = ""
     if authorization:
         token = authorization.removeprefix("Bearer ").strip()
 
-    if token != expected:
+    if not token or not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="Unauthorized cron request.")
 
 
