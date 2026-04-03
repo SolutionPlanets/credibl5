@@ -1,6 +1,26 @@
 {
+  "name": "reply-pulse-mvp",
+  "version": "1.0.0",
+  "workspaces": [
+    "frontend"
+  ],
+  "description": "Root package to manage full-stack development",
+  "scripts": {
+    "predev": "powershell -Command \"Get-NetTCPConnection -LocalPort 3000,8000 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; if (Test-Path frontend/.next/dev/lock) { Remove-Item frontend/.next/dev/lock -Force }\"",
+    "dev": "concurrently --kill-others -n \"backend,frontend\" -c \"yellow,blue\" \"npm run backend\" \"npm run frontend\"",
+    "backend": "cd backend & .\\venv\\Scripts\\python.exe main.py",
+    "frontend": "cd frontend & npm run dev",
+    "build": "cd frontend & npm run build",
+    "frontend-install": "cd frontend & npm install"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
+    "concurrently": "^8.0.0",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.1"
+  },
   "dependencies": {
-    "@supabase/ssr": "^0.9.0",
-    "@supabase/supabase-js": "^2.99.0"
+    "@supabase/supabase-js": "^2.98.0",
+    "dotenv": "^17.3.1"
   }
 }

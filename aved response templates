@@ -1,0 +1,6 @@
+  feature-Dashboard[m f8d69ad [[34morigin/feature-Dashboard[m: ahead 1] Implement Add Location functionality with plan limits and caching
+  feature-auth     [m 16a9bfd [[34morigin/feature-auth[m] Implement user authentication with Supabase and Google My Business OAuth integration, including associated UI components and protected routes, Feature like reset Password, refresh Token Sharing google login onboarding process.
+  feature-gmb      [m d5a2a5b [[34morigin/feature-gmb[m] feat: Implement core application structure including authentication, Google My Business integration, user onboarding, and protected dashboard.
+  feature-payment  [m f0fcecb [[34morigin/feature-payment[m] feat: Implement Razorpay payments, user onboarding, subscription management, and Google My Business integration and user setting page.
+* [32mfeature-template [m d5a2a5b feat: Implement core application structure including authentication, Google My Business integration, user onboarding, and protected dashboard.
+  master           [m cbda6cc initial auth set-up

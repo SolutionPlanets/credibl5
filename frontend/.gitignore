@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+
+new_user_onboarding_pages_refference/*
+/new_user_onboarding_pages_refference
+
+/service-account.json
+service-account.json/*

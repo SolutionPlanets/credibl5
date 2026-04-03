@@ -1,0 +1,1182 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+
+from app.core.deps import get_app_settings, get_bearer_token, get_google_oauth, get_supabase_gateway
+from app.core.settings import Settings
+from app.gmb.oauth import GoogleOAuthService, GoogleReconnectRequired
+from app.gmb.helper import (
+    convert_star_rating,
+    fetch_gmb_accounts,
+    fetch_gmb_locations,
+    fetch_gmb_reviews,
+    format_address,
+    get_error_message,
+    get_sentiment,
+    is_auth_error,
+    upsert_gmb_review_reply,
+)
+from app.core.supabase_gateway import SupabaseGateway
+from app.core.rate_limit import create_rate_limit, RateLimiter
+from app.templates.review_reply_prompt import build_review_reply_prompt, ensure_sign_off, parse_reply_output, sanitize_reply
+from app.templates.escalation import check_escalation
+
+router = APIRouter()
+
+_save_location_limit = create_rate_limit(max_requests=20, window_seconds=60)
+_reply_limit = create_rate_limit(max_requests=5, window_seconds=60)
+_bulk_reply_limit = create_rate_limit(max_requests=2, window_seconds=60)
+_bulk_ai_limit = create_rate_limit(max_requests=2, window_seconds=120)
+_single_ai_limit = create_rate_limit(max_requests=10, window_seconds=60)
+_sync_per_location_limiter = RateLimiter(max_requests=2, window_seconds=60)
+
+# Simple in-memory cache
+# ACCOUNTS_CACHE format: {user_id: {"timestamp": float, "data": Any}}
+# LOCATIONS_CACHE format: {(user_id, account_name): {"timestamp": float, "data": Any}}
+ACCOUNTS_CACHE: Dict[str, Dict[str, Any]] = {}
+LOCATIONS_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+ACCOUNT_LOCKS: Dict[str, asyncio.Lock] = {}
+LOCATION_LOCKS: Dict[Tuple[str, str], asyncio.Lock] = {}
+ACCOUNT_RATE_LIMIT_UNTIL: Dict[str, float] = {}
+LOCATION_RATE_LIMIT_UNTIL: Dict[Tuple[str, str], float] = {}
+ACCESS_TOKEN_CACHE: Dict[str, Dict[str, Any]] = {}  # {user_id: {"token": str, "expires_at": float}}
+ACCOUNTS_CACHE_TTL = 900  # 15 minutes
+LOCATIONS_CACHE_TTL = 300  # 5 minutes
+ACCESS_TOKEN_REFRESH_BUFFER = 300  # Refresh 5 minutes before expiry
+GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS = 65
+
+
+def _get_account_lock(user_id: str) -> asyncio.Lock:
+    lock = ACCOUNT_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        ACCOUNT_LOCKS[user_id] = lock
+    return lock
+
+
+def _get_location_lock(cache_key: Tuple[str, str]) -> asyncio.Lock:
+    lock = LOCATION_LOCKS.get(cache_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        LOCATION_LOCKS[cache_key] = lock
+    return lock
+
+
+def _invalidate_access_token_cache(user_id: str) -> None:
+    ACCESS_TOKEN_CACHE.pop(user_id, None)
+
+
+async def _force_refresh_access_token(
+    user_id: str,
+    supabase: SupabaseGateway,
+    google_oauth: GoogleOAuthService,
+) -> str:
+    """Invalidate cache and fetch a brand-new access token."""
+    _invalidate_access_token_cache(user_id)
+    return await _get_access_token(user_id, supabase, google_oauth)
+
+
+async def _get_access_token(
+    user_id: str,
+    supabase: SupabaseGateway,
+    google_oauth: GoogleOAuthService,
+) -> str:
+    cached = ACCESS_TOKEN_CACHE.get(user_id)
+    if cached and time.time() < cached["expires_at"] - ACCESS_TOKEN_REFRESH_BUFFER:
+        logger.debug("Access token cache hit for user %s", user_id)
+        return cached["token"]
+
+    logger.info("Refreshing access token for user %s", user_id)
+    connection = await supabase.get_google_connection(user_id)
+    if not connection or not connection.get("refresh_token"):
+        raise HTTPException(
+            status_code=401,
+            detail="Google account not connected. Please connect your Google account first.",
+        )
+
+    try:
+        token_data = await google_oauth.refresh_access_token(connection["refresh_token"])
+    except GoogleReconnectRequired:
+        _invalidate_access_token_cache(user_id)
+        raise
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Failed to obtain Google access token.")
+
+    expires_in = int(token_data.get("expires_in", 3600))
+    ACCESS_TOKEN_CACHE[user_id] = {
+        "token": access_token,
+        "expires_at": time.time() + expires_in,
+    }
+    return access_token
+
+
+# ---------------------------------------------------------------------------
+# Request / Response models
+# ---------------------------------------------------------------------------
+
+class SaveLocationRequest(BaseModel):
+    gmbAccountId: str
+    locationId: str
+    locationName: str
+    address: Optional[Any] = None
+
+
+class SyncReviewsRequest(BaseModel):
+    locationId: str
+
+
+class ReplyReviewRequest(BaseModel):
+    locationId: str   # Supabase location UUID
+    gmbReviewId: str  # Google review identifier (full path or short ID)
+    reply: str
+
+
+class BulkReplyItem(BaseModel):
+    gmbReviewId: str
+    locationId: str
+    reply: str
+
+
+class BulkReplyRequest(BaseModel):
+    items: List[BulkReplyItem]
+    source: str = "bulk_template_reply"  # "bulk_template_reply" or "bulk_ai_reply"
+
+
+class SingleAIGenerateRequest(BaseModel):
+    gmbReviewId: str
+    locationId: str
+    reviewerName: str = "Customer"
+    starRating: int = 0
+    reviewText: str = ""
+
+
+class BulkAIGenerateItem(BaseModel):
+    gmbReviewId: str
+    locationId: str
+    reviewerName: str = "Customer"
+    starRating: int = 0
+    reviewText: str = ""
+
+
+class BulkAIGenerateRequest(BaseModel):
+    items: List[BulkAIGenerateItem]
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/accounts")
+async def get_accounts(
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+) -> Dict[str, Any]:
+    user = await supabase.get_user_from_access_token(access_token)
+    now = time.time()
+
+    # Fast-path cache check before lock.
+    if user.id in ACCOUNTS_CACHE:
+        cached = ACCOUNTS_CACHE[user.id]
+        if time.time() - cached["timestamp"] < ACCOUNTS_CACHE_TTL:
+            return {"accounts": cached["data"], "cached": True}
+
+    rate_limit_until = ACCOUNT_RATE_LIMIT_UNTIL.get(user.id, 0.0)
+    if now < rate_limit_until:
+        retry_in = max(1, int(rate_limit_until - now))
+        if user.id in ACCOUNTS_CACHE:
+            return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True}
+        raise HTTPException(
+            status_code=429,
+            detail=f"Google rate limit is active. Please retry in about {retry_in} seconds.",
+        )
+
+    lock = _get_account_lock(user.id)
+    async with lock:
+        now = time.time()
+
+        # Re-check inside the lock to dedupe concurrent requests.
+        if user.id in ACCOUNTS_CACHE:
+            cached = ACCOUNTS_CACHE[user.id]
+            if time.time() - cached["timestamp"] < ACCOUNTS_CACHE_TTL:
+                return {"accounts": cached["data"], "cached": True}
+
+        rate_limit_until = ACCOUNT_RATE_LIMIT_UNTIL.get(user.id, 0.0)
+        if now < rate_limit_until:
+            retry_in = max(1, int(rate_limit_until - now))
+            if user.id in ACCOUNTS_CACHE:
+                return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True}
+            raise HTTPException(
+                status_code=429,
+                detail=f"Google rate limit is active. Please retry in about {retry_in} seconds.",
+            )
+
+        google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+        async def _refresh_cb() -> str:
+            return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
+        try:
+            accounts = await fetch_gmb_accounts(google_token, refresh_callback=_refresh_cb)
+            ACCOUNT_RATE_LIMIT_UNTIL.pop(user.id, None)
+            ACCOUNTS_CACHE[user.id] = {"timestamp": time.time(), "data": accounts}
+            return {"accounts": accounts}
+        except HTTPException as exc:
+            if exc.status_code in (401, 403):
+                _invalidate_access_token_cache(user.id)
+            # If rate-limited but we have any cached data, serve it (even if stale).
+            if exc.status_code == 429 and user.id in ACCOUNTS_CACHE:
+                return {
+                    "accounts": ACCOUNTS_CACHE[user.id]["data"],
+                    "cached": True,
+                    "stale": True,
+                    "rate_limited": True,
+                    "message": "Google rate limit reached. Showing your cached accounts. Please retry in about 1 minute."
+                }
+            if exc.status_code == 429:
+                ACCOUNT_RATE_LIMIT_UNTIL[user.id] = time.time() + GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS
+                raise
+            raise
+        except Exception as exc:
+            if is_auth_error(exc):
+                _invalidate_access_token_cache(user.id)
+            if user.id in ACCOUNTS_CACHE:
+                return {"accounts": ACCOUNTS_CACHE[user.id]["data"], "cached": True, "stale": True}
+
+            # Re-raise with descriptive error message if it's already an HTTPException
+            if isinstance(exc, HTTPException):
+                raise
+
+            status_code = 401 if is_auth_error(exc) else 500
+            detail = get_error_message(exc)
+
+            # Specifically handle GMB auth errors
+            if "google" in detail.lower() or "token" in detail.lower():
+                detail = {
+                    "code": "GOOGLE_AUTH_ERROR",
+                    "message": f"Google connection error: {detail}. Please reconnect your account.",
+                    "original_error": detail
+                }
+
+            raise HTTPException(status_code=status_code, detail=detail)
+
+
+@router.get("/locations")
+async def get_locations(
+    account_name: Annotated[str, Query(alias="accountName")],
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+) -> Dict[str, Any]:
+    if not account_name:
+        raise HTTPException(status_code=400, detail="accountName query parameter is required.")
+
+    user = await supabase.get_user_from_access_token(access_token)
+    now = time.time()
+    
+    cache_key = (user.id, account_name)
+    # Fast-path cache check before lock.
+    if cache_key in LOCATIONS_CACHE:
+        cached = LOCATIONS_CACHE[cache_key]
+        if time.time() - cached["timestamp"] < LOCATIONS_CACHE_TTL:
+            return {"locations": cached["data"], "cached": True}
+
+    rate_limit_until = LOCATION_RATE_LIMIT_UNTIL.get(cache_key, 0.0)
+    if now < rate_limit_until:
+        retry_in = max(1, int(rate_limit_until - now))
+        if cache_key in LOCATIONS_CACHE:
+            return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True}
+        raise HTTPException(
+            status_code=429,
+            detail=f"Google rate limit is active. Please retry in about {retry_in} seconds.",
+        )
+
+    lock = _get_location_lock(cache_key)
+    async with lock:
+        now = time.time()
+
+        if cache_key in LOCATIONS_CACHE:
+            cached = LOCATIONS_CACHE[cache_key]
+            if time.time() - cached["timestamp"] < LOCATIONS_CACHE_TTL:
+                return {"locations": cached["data"], "cached": True}
+
+        rate_limit_until = LOCATION_RATE_LIMIT_UNTIL.get(cache_key, 0.0)
+        if now < rate_limit_until:
+            retry_in = max(1, int(rate_limit_until - now))
+            if cache_key in LOCATIONS_CACHE:
+                return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True}
+            raise HTTPException(
+                status_code=429,
+                detail=f"Google rate limit is active. Please retry in about {retry_in} seconds.",
+            )
+
+        google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+        async def _refresh_cb() -> str:
+            return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
+        try:
+            raw_locations = await fetch_gmb_locations(google_token, account_name, refresh_callback=_refresh_cb)
+            LOCATION_RATE_LIMIT_UNTIL.pop(cache_key, None)
+            formatted = [
+                {
+                    "name": loc.get("name"),
+                    "title": loc.get("title"),
+                    "address": format_address(loc.get("storefrontAddress")),
+                    "phone": loc.get("phoneNumbers", {}).get("primaryPhone", ""),
+                    "website": loc.get("websiteUri", ""),
+                    "category": loc.get("categories", {}).get("primaryCategory", {}).get("displayName", ""),
+                    "is_verified": loc.get("metadata", {}).get("isVerified", False),
+                }
+                for loc in raw_locations
+            ]
+            LOCATIONS_CACHE[cache_key] = {"timestamp": time.time(), "data": formatted}
+            return {"locations": formatted}
+        except HTTPException as exc:
+            if exc.status_code in (401, 403):
+                _invalidate_access_token_cache(user.id)
+            if exc.status_code == 429 and cache_key in LOCATIONS_CACHE:
+                return {
+                    "locations": LOCATIONS_CACHE[cache_key]["data"],
+                    "cached": True,
+                    "stale": True,
+                    "rate_limited": True,
+                    "message": "Google rate limit reached. Showing your cached locations. Please retry in about 1 minute."
+                }
+            if exc.status_code == 429:
+                LOCATION_RATE_LIMIT_UNTIL[cache_key] = time.time() + GOOGLE_RATE_LIMIT_COOLDOWN_SECONDS
+                raise
+            raise
+        except Exception as exc:
+            if is_auth_error(exc):
+                _invalidate_access_token_cache(user.id)
+            if cache_key in LOCATIONS_CACHE:
+                return {"locations": LOCATIONS_CACHE[cache_key]["data"], "cached": True, "stale": True}
+
+            if isinstance(exc, HTTPException):
+                raise
+
+            status_code = 401 if is_auth_error(exc) else 500
+            detail = get_error_message(exc)
+
+            if "google" in detail.lower() or "token" in detail.lower():
+                detail = {
+                    "code": "GOOGLE_AUTH_ERROR",
+                    "message": f"Google connection error: {detail}. Please reconnect your account.",
+                    "original_error": detail
+                }
+
+            raise HTTPException(status_code=status_code, detail=detail)
+
+
+@router.post("/locations/save")
+async def save_location(
+    body: SaveLocationRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+    _rate_limit: Annotated[None, Depends(_save_location_limit)] = None,
+) -> Dict[str, Any]:
+    if not body.gmbAccountId:
+        raise HTTPException(status_code=400, detail="Google Account ID is missing. Please select an account.")
+
+    user = await supabase.get_user_from_access_token(access_token)
+
+    try:
+        now_utc = datetime.now(timezone.utc)
+        existing = await supabase.get_location_by_gmb_location_id(user.id, body.locationId)
+        sub = await supabase.get_user_subscription(user.id)
+
+        plan_type = str((sub or {}).get("plan_type") or "free")
+        billing_cycle = str((sub or {}).get("billing_cycle") or "trial")
+        max_locs = int((sub or {}).get("max_locations") or 1)
+        cycle_end_raw = (sub or {}).get("current_period_end")
+        cycle_end_dt = _parse_iso_datetime(cycle_end_raw)
+        if cycle_end_dt is None:
+            cycle_end_dt = now_utc + timedelta(days=30)
+        cycle_end_iso = cycle_end_dt.isoformat()
+
+        # Backend-triggered lifecycle:
+        # deactivate stale active selections when cycle ended or plan changed.
+        active_locations = await supabase.get_user_active_locations(user.id)
+        deactivate_ids: List[str] = []
+        for row in active_locations:
+            locked_until = _parse_iso_datetime(row.get("activation_locked_until"))
+            activated_plan_type = row.get("activated_plan_type")
+            activated_billing_cycle = row.get("activated_billing_cycle")
+
+            plan_changed = (
+                activated_plan_type is not None
+                and activated_plan_type != plan_type
+            ) or (
+                activated_billing_cycle is not None
+                and activated_billing_cycle != billing_cycle
+            )
+            cycle_expired = locked_until is not None and now_utc >= locked_until
+            legacy_unlocked = locked_until is None
+
+            if plan_changed or cycle_expired or legacy_unlocked:
+                if row.get("id"):
+                    deactivate_ids.append(str(row["id"]))
+
+        if deactivate_ids:
+            await supabase.deactivate_locations(deactivate_ids)
+
+        existing_is_active = bool(existing and existing.get("is_active"))
+        if existing and existing.get("id") and str(existing["id"]) in deactivate_ids:
+            existing_is_active = False
+
+        limit_reached = False
+        # Enforce plan limit only on new activation.
+        if not existing_is_active:
+            current_active_count = await supabase.count_user_active_locations(user.id)
+            if max_locs != -1 and current_active_count >= max_locs:
+                limit_reached = True
+
+        location_data: Dict[str, Any] = {
+            "user_id": user.id,
+            "email": user.email,
+            "gmb_account_id": body.gmbAccountId,
+            "location_id": body.locationId,
+            "location_name": body.locationName,
+            "address": body.address,
+            "updated_at": now_utc.isoformat(),
+        }
+
+        # Activate and lock this location for the current plan cycle.
+        if not existing_is_active:
+            if limit_reached:
+                location_data.update({"is_active": False})
+            else:
+                location_data.update(
+                    {
+                        "is_active": True,
+                        "activated_at": now_utc.isoformat(),
+                        "activation_locked_until": cycle_end_iso,
+                        "activated_plan_type": plan_type,
+                        "activated_billing_cycle": billing_cycle,
+                    }
+                )
+
+        if existing:
+            location_data["id"] = existing["id"]
+
+        result = await supabase.upsert_location(location_data)
+        
+        if limit_reached:
+            return {
+                "success": True,
+                "location": result,
+                "message": f"Location saved, but not activated because you have reached your plan limit of {max_locs} active locations.",
+                "limit_reached": True,
+            }
+
+        return {
+            "success": True,
+            "location": result,
+            "message": "Location activated successfully for your current plan cycle.",
+            "limit_reached": False,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/reviews/sync")
+async def sync_reviews(
+    body: SyncReviewsRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+) -> Dict[str, Any]:
+    user = await supabase.get_user_from_access_token(access_token)
+
+    sync_key = f"{user.id}:{body.locationId}"
+    if not _sync_per_location_limiter.check(sync_key):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many sync requests for this location. Please wait before syncing again.",
+        )
+    google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+    async def _refresh_cb() -> str:
+        return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
+    location = await supabase.get_location_for_user_by_id(user.id, body.locationId)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found.")
+
+    acc_id = location.get('gmb_account_id', '').split('/')[-1]
+    loc_id = location.get('location_id', '').split('/')[-1]
+
+    if not acc_id:
+        # Self-healing: Find account ID automatically
+        accounts = await fetch_gmb_accounts(google_token, refresh_callback=_refresh_cb)
+        for acc in accounts:
+            acc_name = acc.get('name')
+            if not acc_name:
+                continue
+            locs = await fetch_gmb_locations(google_token, acc_name, refresh_callback=_refresh_cb)
+            if any(l.get('name', '').split('/')[-1] == loc_id for l in locs):
+                acc_id = acc_name.split('/')[-1]
+                break
+
+        if not acc_id:
+            logger.error("Could not auto-discover gmb_account_id for location %s", loc_id)
+            raise HTTPException(
+                status_code=400,
+                detail="This location is missing its Google Account ID and we could not auto-recover it. Please re-add this location from the dashboard."
+            )
+
+        logger.info("Auto-recovered gmb_account_id %s for location %s", acc_id, loc_id)
+        try:
+            update_data = {
+                "id": location["id"],
+                "gmb_account_id": acc_id,
+                "user_id": user.id,
+                "location_id": location.get("location_id"),
+                "location_name": location.get("location_name")
+            }
+            await supabase.upsert_location(update_data)
+        except Exception as e:
+            logger.warning("Failed to save recovered gmb_account_id: %s", e)
+
+    gmb_path = f"accounts/{acc_id}/locations/{loc_id}"
+
+    try:
+        # Always fetch all reviews — client handles deduplication in IndexedDB
+        gmb_reviews, pages_fetched = await fetch_gmb_reviews(
+            google_token, gmb_path,
+            known_review_ids=None,
+            refresh_callback=_refresh_cb,
+        )
+        logger.info(
+            "sync_reviews: location=%s pages=%d fetched=%d",
+            body.locationId, pages_fetched, len(gmb_reviews),
+        )
+
+        if not gmb_reviews:
+            # Check if reason might be lack of verification
+            msg = "No reviews found for this location."
+            
+            # Fetch location details and account details to check verification status if 0 reviews
+            try:
+                # Check account verification first
+                raw_accs = await fetch_gmb_accounts(google_token, refresh_callback=_refresh_cb)
+                this_acc = next((a for a in raw_accs if a.get("name", "").split("/")[-1] == str(acc_id)), None)
+                
+                if this_acc and this_acc.get("verificationState") != "VERIFIED":
+                    msg = (
+                        "Google API returned no reviews. Your Google Business Account is currently 'UNVERIFIED' or 'PENDING'. "
+                        "Google restricts API access for unverified accounts. Please complete your account verification in the "
+                        "Google Business Profile console and try again."
+                    )
+                else:
+                    # Account is verified, check the specific location
+                    raw_locs = await fetch_gmb_locations(google_token, f"accounts/{acc_id}", refresh_callback=_refresh_cb)
+                    this_loc = next((l for l in raw_locs if l.get("name", "").split("/")[-1] == loc_id), None)
+                    if this_loc and not this_loc.get("metadata", {}).get("isVerified"):
+                        msg = "Google API returned no reviews. This usually happens because your location is not yet 'Verified' in Google Business Profile. Please complete verification on Google and try again in 24-48 hours."
+            except Exception as e:
+                logger.warning("Failed to check verification status during empty sync: %s", e)
+
+            logger.warning(
+                "sync_reviews: 0 reviews — locationId=%s gmb_path=%s pages=%d msg=%s",
+                body.locationId, gmb_path, pages_fetched, msg,
+            )
+            return {
+                "success": True,
+                "reviews": [],
+                "count": 0,
+                "pagesFetched": pages_fetched,
+                "gmb_path": gmb_path,
+                "message": msg,
+            }
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        batch: List[Dict[str, Any]] = []
+        for review in gmb_reviews:
+            star_rating = convert_star_rating(review.get("starRating"))
+            reply_obj = review.get("reviewReply")
+            reviewer = review.get("reviewer", {})
+            batch.append({
+                "location_id": body.locationId,
+                "gmb_review_id": review.get("reviewId") or review.get("name"),
+                "reviewer_name": reviewer.get("displayName", "Anonymous"),
+                "reviewer_profile_photo_url": reviewer.get("profilePhotoUrl"),
+                "star_rating": star_rating,
+                "review_text": review.get("comment", ""),
+                "review_date": review.get("createTime"),
+                "sentiment": get_sentiment(star_rating, review.get("comment", "")),
+                "is_read": False,
+                "review_reply": reply_obj.get("comment") if reply_obj else None,
+                "synced_at": now_iso,
+            })
+
+        # Reviews are returned to the client for browser storage — not persisted to Supabase
+        return {
+            "success": True,
+            "reviews": batch,
+            "count": len(batch),
+            "pagesFetched": pages_fetched,
+            "message": f"Fetched {len(batch)} reviews from Google.",
+        }
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            _invalidate_access_token_cache(user.id)
+        raise
+    except Exception as exc:
+        if is_auth_error(exc):
+            _invalidate_access_token_cache(user.id)
+        raise HTTPException(status_code=500, detail=get_error_message(exc))
+
+
+@router.post("/reviews/reply")
+async def reply_review(
+    body: ReplyReviewRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+    _rate_limit: Annotated[None, Depends(_reply_limit)] = None,
+) -> Dict[str, Any]:
+    user = await supabase.get_user_from_access_token(access_token)
+
+    reply_text = body.reply.strip()
+    if not reply_text:
+        raise HTTPException(status_code=400, detail="Reply cannot be empty.")
+    if len(reply_text) > 4096:
+        raise HTTPException(status_code=400, detail="Reply exceeds 4096 characters.")
+
+    gmb_review_id = body.gmbReviewId.strip()
+    if not gmb_review_id:
+        raise HTTPException(status_code=400, detail="gmbReviewId is required.")
+
+    location_id = body.locationId.strip()
+    if not location_id:
+        raise HTTPException(status_code=400, detail="locationId is required.")
+
+    location = await supabase.get_location_for_user_by_id(user.id, location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail="Location not found.")
+
+    if (
+        gmb_review_id.startswith("accounts/")
+        and "/locations/" in gmb_review_id
+        and "/reviews/" in gmb_review_id
+    ):
+        review_path = gmb_review_id
+    else:
+        acc_id = location['gmb_account_id'].split('/')[-1]
+        loc_id = location['location_id'].split('/')[-1]
+        review_id = gmb_review_id.split('/')[-1]
+        review_path = f"accounts/{acc_id}/locations/{loc_id}/reviews/{review_id}"
+
+    google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+    async def _refresh_cb() -> str:
+        return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
+    try:
+        google_reply = await upsert_gmb_review_reply(
+            access_token=google_token,
+            review_path=review_path,
+            reply_comment=reply_text,
+            refresh_callback=_refresh_cb,
+        )
+
+        return {
+            "success": True,
+            "gmbReviewId": gmb_review_id,
+            "reply": google_reply.get("comment", reply_text),
+            "message": "Reply posted successfully.",
+        }
+    except HTTPException as exc:
+        if exc.status_code in (401, 403):
+            _invalidate_access_token_cache(user.id)
+        raise
+    except Exception as exc:
+        if is_auth_error(exc):
+            _invalidate_access_token_cache(user.id)
+        raise HTTPException(status_code=500, detail=get_error_message(exc))
+
+
+# ---------------------------------------------------------------------------
+# Bulk reply helpers
+# ---------------------------------------------------------------------------
+
+async def _resolve_review_path(
+    supabase: SupabaseGateway,
+    user_id: str,
+    location_id: str,
+    gmb_review_id: str,
+) -> str:
+    """Build the full Google review path from IDs."""
+    if (
+        gmb_review_id.startswith("accounts/")
+        and "/locations/" in gmb_review_id
+        and "/reviews/" in gmb_review_id
+    ):
+        return gmb_review_id
+
+    location = await supabase.get_location_for_user_by_id(user_id, location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail=f"Location {location_id} not found.")
+
+    acc_id = location["gmb_account_id"].split("/")[-1]
+    loc_id = location["location_id"].split("/")[-1]
+    review_id = gmb_review_id.split("/")[-1]
+    return f"accounts/{acc_id}/locations/{loc_id}/reviews/{review_id}"
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/bulk-reply
+# ---------------------------------------------------------------------------
+
+@router.post("/reviews/bulk-reply")
+async def bulk_reply_reviews(
+    body: BulkReplyRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+    _rate_limit: Annotated[None, Depends(_bulk_reply_limit)] = None,
+) -> Dict[str, Any]:
+    if len(body.items) == 0:
+        raise HTTPException(status_code=400, detail="No items provided.")
+    if len(body.items) > 25:
+        raise HTTPException(status_code=400, detail="Maximum 25 reviews per bulk request.")
+
+    for item in body.items:
+        text = item.reply.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail=f"Reply for {item.gmbReviewId} is empty.")
+        if len(text) > 4096:
+            raise HTTPException(status_code=400, detail=f"Reply for {item.gmbReviewId} exceeds 4096 chars.")
+
+    user = await supabase.get_user_from_access_token(access_token)
+    google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+    async def _refresh_cb() -> str:
+        return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
+    results: List[Dict[str, Any]] = []
+    succeeded = 0
+    failed = 0
+
+    rule_name = body.source
+
+    for item in body.items:
+        try:
+            review_path = await _resolve_review_path(
+                supabase, user.id, item.locationId, item.gmbReviewId
+            )
+            google_reply = await upsert_gmb_review_reply(
+                access_token=google_token,
+                review_path=review_path,
+                reply_comment=item.reply.strip(),
+                refresh_callback=_refresh_cb,
+            )
+            posted_reply = google_reply.get("comment", item.reply.strip())
+            results.append({
+                "gmbReviewId": item.gmbReviewId,
+                "success": True,
+                "reply": posted_reply,
+            })
+            succeeded += 1
+
+            # Log to auto_reply_logs
+            await supabase.log_bulk_reply(
+                user_id=user.id,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                action="replied",
+                rule_name=rule_name,
+                reply_text=posted_reply,
+                credits_consumed=1 if rule_name == "bulk_ai_reply" else 0,
+            )
+        except Exception as exc:
+            logger.error("Bulk reply failed for %s: %s", item.gmbReviewId, exc)
+            results.append({
+                "gmbReviewId": item.gmbReviewId,
+                "success": False,
+                "error": str(exc),
+            })
+            failed += 1
+
+            # Log failure
+            await supabase.log_bulk_reply(
+                user_id=user.id,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                action="skipped_error",
+                rule_name=rule_name,
+                error_message=str(exc),
+            )
+
+    return {
+        "total": len(body.items),
+        "succeeded": succeeded,
+        "failed": failed,
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/bulk-ai-generate
+# ---------------------------------------------------------------------------
+
+async def _fetch_brand_voice_for_location(
+    settings: Settings,
+    user_id: str,
+    location_id: str,
+) -> Dict[str, Any]:
+    """Fetch brand voice settings for a location using service role."""
+    import httpx as _httpx
+
+    headers = {
+        "apikey": settings.service_role_key,
+        "Authorization": f"Bearer {settings.service_role_key}",
+    }
+    url = f"{settings.supabase_url}/rest/v1/brand_voices"
+    params = {
+        "select": "*",
+        "user_id": f"eq.{user_id}",
+        "location_id": f"eq.{location_id}",
+        "limit": "1",
+    }
+
+    async with _httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url, headers=headers, params=params)
+
+    if resp.status_code < 400 and resp.json():
+        return resp.json()[0]
+    return {}
+
+
+@router.post("/reviews/bulk-ai-generate")
+async def bulk_ai_generate(
+    body: BulkAIGenerateRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    _rate_limit: Annotated[None, Depends(_bulk_ai_limit)] = None,
+) -> Dict[str, Any]:
+    if len(body.items) == 0:
+        raise HTTPException(status_code=400, detail="No items provided.")
+    if len(body.items) > 25:
+        raise HTTPException(status_code=400, detail="Maximum 25 reviews per bulk request.")
+
+    user = await supabase.get_user_from_access_token(access_token)
+    count = len(body.items)
+
+    # Check credits upfront
+    credit_info = await supabase.get_ai_credits(user.id)
+    if credit_info["remaining_ai_credits"] < count:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_CREDITS",
+                "message": (
+                    f"You need {count} AI credit(s) but have "
+                    f"{credit_info['remaining_ai_credits']} remaining."
+                ),
+                "remaining_ai_credits": credit_info["remaining_ai_credits"],
+                "credits_needed": count,
+            },
+        )
+
+    # Deduct credits atomically upfront
+    await supabase.deduct_ai_credits(user.id, count)
+
+    # Setup Gemini
+    api_key = settings.gemini_api_key
+    if not api_key:
+        await supabase.add_addon_ai_credits(user.id, count)
+        raise HTTPException(status_code=500, detail="AI service is not configured.")
+
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+
+    # Fetch brand voice (use first item's location — UI enforces single location)
+    first_location_id = body.items[0].locationId
+    bv = await _fetch_brand_voice_for_location(settings, user.id, first_location_id)
+
+    location = await supabase.get_location_for_user_by_id(user.id, first_location_id)
+    business_name = bv.get("business_name") or (location["location_name"] if location else "Our Business")
+
+    results: List[Dict[str, Any]] = []
+    succeeded = 0
+    failed = 0
+
+    for item in body.items:
+        try:
+            # Escalation pre-check (no LLM call)
+            escalation = check_escalation(item.reviewText or "")
+            if escalation.should_escalate:
+                results.append({
+                    "gmbReviewId": item.gmbReviewId,
+                    "success": False,
+                    "escalated": True,
+                    "reason": escalation.reason,
+                })
+                failed += 1
+                continue
+
+            prompt = build_review_reply_prompt(
+                business_name=business_name,
+                reviewer_name=item.reviewerName or "Customer",
+                star_rating=item.starRating,
+                review_text=item.reviewText or "",
+                brand_voice=bv,
+                support_contact=bv.get("support_contact"),
+                allow_emojis=bv.get("allow_emojis", False),
+            )
+
+            result = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt,
+            )
+            raw_output = result.text.strip()
+
+            # Check if LLM triggered escalation
+            parsed = parse_reply_output(raw_output)
+            if parsed["escalated"]:
+                results.append({
+                    "gmbReviewId": item.gmbReviewId,
+                    "success": False,
+                    "escalated": True,
+                    "reason": parsed["reason"],
+                })
+                failed += 1
+                continue
+
+            reply = sanitize_reply(parsed["reply"])
+            reply = ensure_sign_off(reply, bv)
+
+            results.append({
+                "gmbReviewId": item.gmbReviewId,
+                "success": True,
+                "generatedReply": reply,
+            })
+            succeeded += 1
+
+            await supabase.log_ai_usage(
+                user_id=user.id,
+                action_type="bulk_ai_generate",
+                credits_used=1,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                review_response_id=str(uuid.uuid4()),
+                reviewer_name=item.reviewerName,
+                model_name="gemini-2.5-flash-lite",
+                request_meta={
+                    "source": "bulk_ai_generate",
+                    "generated_reply": reply,
+                    "star_rating": item.starRating,
+                    "review_text": item.reviewText,
+                },
+            )
+
+            # Log to auto_reply_logs
+            await supabase.log_bulk_reply(
+                user_id=user.id,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                action="replied",
+                rule_name="bulk_ai_reply",
+                reply_text=reply,
+                credits_consumed=1,
+            )
+
+        except Exception as exc:
+            logger.error("Bulk AI generate failed for %s: %s", item.gmbReviewId, exc)
+            results.append({
+                "gmbReviewId": item.gmbReviewId,
+                "success": False,
+                "error": str(exc),
+            })
+            failed += 1
+
+            await supabase.log_bulk_reply(
+                user_id=user.id,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                action="skipped_error",
+                rule_name="bulk_ai_reply",
+                error_message=str(exc),
+            )
+
+    # Refund credits for failed generations
+    if failed > 0:
+        try:
+            await supabase.add_addon_ai_credits(user.id, failed)
+        except Exception as exc:
+            logger.error("Failed to refund %d credits for user %s: %s", failed, user.id[:8], exc)
+
+    return {
+        "total": count,
+        "succeeded": succeeded,
+        "failed": failed,
+        "creditsUsed": succeeded,
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/generate-reply  (single review AI reply)
+# ---------------------------------------------------------------------------
+
+@router.post("/reviews/generate-reply")
+async def single_ai_generate_reply(
+    body: SingleAIGenerateRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    _rate_limit: Annotated[None, Depends(_single_ai_limit)] = None,
+) -> Dict[str, Any]:
+    """Generate an AI reply for a single review using the location's brand voice."""
+
+    user = await supabase.get_user_from_access_token(access_token)
+
+    # Check credits
+    credit_info = await supabase.get_ai_credits(user.id)
+    if credit_info["remaining_ai_credits"] < 1:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_CREDITS",
+                "message": (
+                    f"You need 1 AI credit but have "
+                    f"{credit_info['remaining_ai_credits']} remaining. "
+                    "Purchase more credits or upgrade your plan."
+                ),
+                "remaining_ai_credits": credit_info["remaining_ai_credits"],
+            },
+        )
+
+    # Deduct 1 credit upfront
+    await supabase.deduct_ai_credits(user.id, 1)
+
+    # Check Gemini API key
+    api_key = settings.gemini_api_key
+    if not api_key:
+        await supabase.add_addon_ai_credits(user.id, 1)
+        raise HTTPException(status_code=500, detail="AI service is not configured.")
+
+    # Escalation pre-check (no LLM call, saves credits)
+    escalation = check_escalation(body.reviewText or "")
+    if escalation.should_escalate:
+        await supabase.add_addon_ai_credits(user.id, 1)
+        return {
+            "success": False,
+            "escalated": True,
+            "reason": escalation.reason,
+            "generatedReply": None,
+            "creditsUsed": 0,
+        }
+
+    # Fetch brand voice for the location
+    bv = await _fetch_brand_voice_for_location(settings, user.id, body.locationId)
+    if not bv:
+        await supabase.add_addon_ai_credits(user.id, 1)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "NO_BRAND_VOICE",
+                "message": "No brand voice configured for this location. Please create a brand voice first and try again.",
+            },
+        )
+
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+
+    location = await supabase.get_location_for_user_by_id(user.id, body.locationId)
+    business_name = bv.get("business_name") or (location["location_name"] if location else "Our Business")
+
+    prompt = build_review_reply_prompt(
+        business_name=business_name,
+        reviewer_name=body.reviewerName or "Customer",
+        star_rating=body.starRating,
+        review_text=body.reviewText or "",
+        brand_voice=bv,
+        support_contact=bv.get("support_contact"),
+        allow_emojis=bv.get("allow_emojis", False),
+    )
+
+    try:
+        result = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+        )
+        raw_output = result.text.strip()
+
+        # Check if LLM triggered escalation (nuanced cases regex missed)
+        parsed = parse_reply_output(raw_output)
+        if parsed["escalated"]:
+            await supabase.add_addon_ai_credits(user.id, 1)
+            return {
+                "success": False,
+                "escalated": True,
+                "reason": parsed["reason"],
+                "generatedReply": None,
+                "creditsUsed": 0,
+            }
+
+        reply = sanitize_reply(parsed["reply"])
+        reply = ensure_sign_off(reply, bv)
+
+    except Exception as exc:
+        logger.error("Single AI generate failed for %s: %s", body.gmbReviewId, exc)
+        await supabase.add_addon_ai_credits(user.id, 1)
+        raise HTTPException(status_code=502, detail=f"AI generation failed: {exc}")
+
+    # Log AI usage with rich metadata
+    await supabase.log_ai_usage(
+        user_id=user.id,
+        action_type="generate_reply",
+        credits_used=1,
+        location_id=body.locationId,
+        review_id=body.gmbReviewId,
+        review_response_id=str(uuid.uuid4()),
+        reviewer_name=body.reviewerName,
+        model_name="gemini-2.5-flash-lite",
+        request_meta={
+            "source": "single_ai_generate",
+            "generated_reply": reply,
+            "star_rating": body.starRating,
+            "review_text": body.reviewText,
+        },
+    )
+
+    return {
+        "success": True,
+        "escalated": False,
+        "generatedReply": reply,
+        "creditsUsed": 1,
+    }
