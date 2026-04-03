@@ -108,6 +108,20 @@ class SupabaseGateway:
         if response.status_code >= 400:
             raise HTTPException(status_code=500, detail=self._postgrest_error(response))
 
+    async def get_all_plans(self) -> List[Dict[str, Any]]:
+        """Fetch all rows from the plans table (subscriptions + addons)."""
+        url = f"{self.settings.supabase_url}/rest/v1/plans"
+        headers = self._service_headers()
+        params = {
+            "select": "id,plan_type,name,usd_monthly,usd_yearly,usd_unit_price,inr_monthly,inr_yearly,inr_unit_price,credits,max_locations,is_addon,is_popular,features,limits_config",
+            "order": "created_at.asc",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(response))
+        return response.json()
+
     async def get_user_subscription(self, user_id: str) -> Optional[Dict[str, Any]]:
         url = f"{self.settings.supabase_url}/rest/v1/subscription_plans"
         headers = self._service_headers()
@@ -314,9 +328,9 @@ class SupabaseGateway:
 
 
     async def get_ai_credits(self, user_id: str) -> dict:
+        """Return AI credit info from subscription_plans (single source of truth)."""
         headers = self._service_headers()
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # Plan-based credits from subscription_plans
             plan_resp = await client.get(
                 f"{self.settings.supabase_url}/rest/v1/subscription_plans",
                 headers=headers,
@@ -326,58 +340,133 @@ class SupabaseGateway:
                     "limit": "1",
                 },
             )
-            # Usage count from user_profiles
-            usage_resp = await client.get(
-                f"{self.settings.supabase_url}/rest/v1/user_profiles",
-                headers=headers,
-                params={
-                    "select": "ai_credits",
-                    "id": f"eq.{user_id}",
-                    "limit": "1",
-                },
-            )
 
         if plan_resp.status_code >= 400:
             raise HTTPException(status_code=500, detail=self._postgrest_error(plan_resp))
-        if usage_resp.status_code >= 400:
-            raise HTTPException(status_code=500, detail=self._postgrest_error(usage_resp))
 
         plan_data = plan_resp.json()
-        usage_data = usage_resp.json()
+        if not plan_data:
+            return {"total_ai_credits": 0, "ai_credits_used": 0, "remaining_ai_credits": 0}
 
-        total = plan_data[0].get("total_ai_credits") or 0 if plan_data else 0
-        used = usage_data[0].get("ai_credits") or 0 if usage_data else 0
-        remaining = max(total - used, 0)
-
+        row = plan_data[0]
         return {
-            "total_ai_credits": total,
-            "ai_credits_used": used,
-            "remaining_ai_credits": remaining,
+            "total_ai_credits": row.get("total_ai_credits") or 0,
+            "ai_credits_used": row.get("ai_credits_used") or 0,
+            "remaining_ai_credits": row.get("remaining_ai_credits") or 0,
         }
 
-    async def add_addon_ai_credits(self, user_id: str, credits: int) -> None:
-        """Add purchased addon credits to total_ai_credits in subscription_plans."""
-        url = f"{self.settings.supabase_url}/rest/v1/subscription_plans"
-        headers = self._service_headers()
+    async def deduct_ai_credits(self, user_id: str, credits: int = 1) -> dict:
+        """Atomically deduct AI credits via RPC. Returns {success, total, used, remaining}."""
+        url = f"{self.settings.supabase_url}/rest/v1/rpc/deduct_ai_credits"
+        headers = self._service_headers({"Content-Type": "application/json"})
+
         async with httpx.AsyncClient(timeout=15.0) as client:
-            get_resp = await client.get(
+            resp = await client.post(
                 url,
                 headers=headers,
-                params={"select": "total_ai_credits", "user_id": f"eq.{user_id}", "limit": "1"},
+                json={"p_user_id": user_id, "p_credits": credits},
             )
-        if get_resp.status_code >= 400:
-            raise HTTPException(status_code=500, detail=self._postgrest_error(get_resp))
-        data = get_resp.json()
-        current = data[0].get("total_ai_credits") or 0 if data else 0
+
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(resp))
+
+        return resp.json()
+
+    async def log_ai_usage(
+        self,
+        user_id: str,
+        action_type: str,
+        credits_used: int = 1,
+        location_id: Optional[str] = None,
+        review_id: Optional[str] = None,
+        review_response_id: Optional[str] = None,
+        reviewer_name: Optional[str] = None,
+        model_name: str = "gemini-2.5-flash-lite",
+        request_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Insert a row into ai_usage_logs to track credit consumption.
+
+        review_id accepts the gmb_review_id string (text column).
+        """
+        url = f"{self.settings.supabase_url}/rest/v1/ai_usage_logs"
+        headers = self._service_headers({"Content-Type": "application/json"})
+
+        payload = {
+            "organization_id": user_id,
+            "location_id": location_id,
+            "review_id": review_id,
+            "review_response_id": review_response_id,
+            "reviewer_name": reviewer_name,
+            "model_name": model_name,
+            "action_type": action_type,
+            "credits_used": credits_used,
+            "request_meta_json": request_meta,
+        }
+
         async with httpx.AsyncClient(timeout=15.0) as client:
-            patch_resp = await client.patch(
-                url,
-                headers=self._service_headers({"Content-Type": "application/json"}),
-                params={"user_id": f"eq.{user_id}"},
-                json={"total_ai_credits": current + credits},
+            resp = await client.post(url, headers=headers, json=[payload])
+
+        if resp.status_code >= 400:
+            import logging
+            logging.getLogger(__name__).error(
+                "Failed to log AI usage for user %s: %s", user_id[:8], resp.text[:200]
             )
-        if patch_resp.status_code >= 400:
-            raise HTTPException(status_code=500, detail=self._postgrest_error(patch_resp))
+
+    async def add_addon_ai_credits(self, user_id: str, credits: int) -> dict:
+        """Atomically add purchased addon credits via RPC."""
+        url = f"{self.settings.supabase_url}/rest/v1/rpc/add_addon_credits"
+        headers = self._service_headers({"Content-Type": "application/json"})
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                url,
+                headers=headers,
+                json={"p_user_id": user_id, "p_credits": credits},
+            )
+
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=500, detail=self._postgrest_error(resp))
+
+        result = resp.json()
+        if not result.get("success"):
+            raise HTTPException(status_code=404, detail="No subscription found for user.")
+        return result
+
+    async def log_bulk_reply(
+        self,
+        user_id: str,
+        location_id: Optional[str],
+        review_id: Optional[str],
+        action: str,
+        rule_name: str,
+        reply_text: Optional[str] = None,
+        credits_consumed: int = 0,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Insert a row into auto_reply_logs for bulk reply operations."""
+        url = f"{self.settings.supabase_url}/rest/v1/auto_reply_logs"
+        headers = self._service_headers({"Content-Type": "application/json"})
+
+        payload = {
+            "user_id": user_id,
+            "rule_id": None,
+            "location_id": location_id,
+            "review_id": review_id,
+            "rule_name": rule_name,
+            "action": action,
+            "reply_text": reply_text,
+            "credits_consumed": credits_consumed,
+            "error_message": error_message,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                await client.post(url, headers=headers, json=[payload])
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error(
+                "Failed to insert bulk reply log for user %s: %s", user_id[:8], exc
+            )
 
     # -----------------------------------------------------------------------
     # Auto-Reply Rules

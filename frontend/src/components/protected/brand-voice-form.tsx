@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createClient } from "@/lib/supabase/client";
 import { Loader2, Mic2, Sparkles } from "lucide-react";
+import { showCreditDeducted, showInsufficientCredits } from "@/lib/credit-alerts";
 
 interface LocationRow {
   id: string;
@@ -211,7 +212,7 @@ export function BrandVoiceForm({
   const [isFilling, setIsFilling] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleFillWithAI = () => {
+  const handleFillWithAI = async () => {
     if (!locationId) {
       setError("Please select a location first to auto-fill.");
       return;
@@ -226,23 +227,51 @@ export function BrandVoiceForm({
     setIsFilling(true);
     setError(null);
 
-    // Simulate AI processing delay
-    setTimeout(() => {
-      const locName = selectedLocation.location_name;
-      const profile = inferProfileFromName(locName);
+    // Deduct 1 AI credit before filling
+    try {
+      const res = await fetch("/routes/use_ai_credit_routes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action_type: "brand_voice_fill", location_id: locationId }),
+      });
+      const body = await res.json().catch(() => ({}));
 
-      setBusinessName(locName);
-      setIndustry(profile.industry);
-      setTargetAudience(profile.targetAudience);
-      setBrandValues(profile.brandValues);
-      setTone(profile.tone);
-      setKeyPhrases(profile.keyPhrases);
-      setPhrasesToAvoid(profile.phrasesToAvoid);
-      setPreferredResponseLength("medium");
-      setLanguageDialect("English");
-      setSignatureSignoff(`Best regards, ${locName} Team`);
+      if (!res.ok) {
+        if (res.status === 402 || body.code === "INSUFFICIENT_CREDITS") {
+          showInsufficientCredits();
+          setError("Insufficient AI credits. Purchase more credits or upgrade your plan.");
+        } else {
+          setError(body.error ?? "Failed to use AI credits.");
+        }
+        setIsFilling(false);
+        return;
+      }
+
+      // Credit deducted — show toast
+      if (typeof body.remaining_ai_credits === "number") {
+        showCreditDeducted(body.remaining_ai_credits);
+      }
+    } catch {
+      setError("Failed to process AI credits. Please try again.");
       setIsFilling(false);
-    }, 800);
+      return;
+    }
+
+    // Fill form with AI-inferred data
+    const locName = selectedLocation.location_name;
+    const profile = inferProfileFromName(locName);
+
+    setBusinessName(locName);
+    setIndustry(profile.industry);
+    setTargetAudience(profile.targetAudience);
+    setBrandValues(profile.brandValues);
+    setTone(profile.tone);
+    setKeyPhrases(profile.keyPhrases);
+    setPhrasesToAvoid(profile.phrasesToAvoid);
+    setPreferredResponseLength("medium");
+    setLanguageDialect("English");
+    setSignatureSignoff(`Best regards, ${locName} Team`);
+    setIsFilling(false);
   };
 
   useEffect(() => {

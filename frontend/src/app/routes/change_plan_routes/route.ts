@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { createAdminClient, createClient } from "@/lib/supabase/server";
 import {
-  PLAN_DEFINITIONS,
   createPlanDates,
   getStoredBillingCycle,
+  isPlanId,
+  PLAN_RANK,
   type BillingCycle,
   type PlanId,
 } from "@/lib/shared/plan-config";
+import { getServerPlanDefinition } from "@/lib/shared/plan-server";
 import { rateLimit, getIP } from "@/lib/rate-limit";
 
 const limiter = rateLimit({ interval: 60_000, limit: 5 });
@@ -15,17 +17,6 @@ type ChangePlanBody = {
   planType?: PlanId;
   billingCycle?: BillingCycle;
 };
-
-const PLAN_RANK: Record<PlanId, number> = {
-  free: 0,
-  starter: 1,
-  growth: 2,
-  agency: 3,
-};
-
-function isPlanId(value: string | undefined): value is PlanId {
-  return Boolean(value && value in PLAN_DEFINITIONS);
-}
 
 function isBillingCycle(value: string | undefined): value is BillingCycle {
   return value === "monthly" || value === "yearly";
@@ -86,6 +77,7 @@ export async function POST(request: Request) {
       );
     }
 
+    const planDef = await getServerPlanDefinition(requestedPlan);
     const normalizedCycle = requestedPlan === "free" ? "monthly" : requestedCycle;
     const { startDate, endDate } = createPlanDates(requestedPlan, normalizedCycle);
     const isTrialPlan = requestedPlan === "free";
@@ -95,7 +87,7 @@ export async function POST(request: Request) {
         user_id: user.id,
         email: user.email ?? null,
         plan_type: requestedPlan,
-        max_locations: PLAN_DEFINITIONS[requestedPlan].maxLocations,
+        max_locations: planDef.maxLocations,
         billing_cycle: getStoredBillingCycle(requestedPlan, normalizedCycle),
         status: isTrialPlan ? "trial" : "active",
         amount_paid_cents: isTrialPlan
@@ -120,7 +112,7 @@ export async function POST(request: Request) {
       planType: requestedPlan,
       billingCycle: getStoredBillingCycle(requestedPlan, normalizedCycle),
       currentPeriodEnd: endDate.toISOString(),
-      message: `Plan updated to ${PLAN_DEFINITIONS[requestedPlan].name}.`,
+      message: `Plan updated to ${planDef.name}.`,
     });
   } catch (error) {
     console.error("change-plan failed:", error);

@@ -1,7 +1,7 @@
 import { createAdminClient, createClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { createPlanDates, getStoredBillingCycle } from "@/lib/shared/plan-config";
+import { createPlanDates, getStoredBillingCycle, FREE_PLAN_DEFAULTS } from "@/lib/shared/plan-config";
 
 type CallbackFlow = "login" | "connect-google";
 
@@ -48,7 +48,7 @@ async function ensureSubscriptionRow(
     user_id: userId,
     email,
     plan_type: "free",
-    max_locations: 1,
+    max_locations: FREE_PLAN_DEFAULTS.maxLocations,
     billing_cycle: getStoredBillingCycle("free", "monthly"),
     status: "trial",
     amount_paid_cents: 0,

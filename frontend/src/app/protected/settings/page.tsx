@@ -21,7 +21,7 @@ import {
 
 import { createClient } from "@/lib/supabase/client";
 import { useCurrency } from "@/lib/shared/currency-context";
-import { getPlanPrice, getPlanDefinition, PLAN_DEFINITIONS, PLAN_ORDER, PLAN_RANK, isPlanId } from "@/lib/shared/plan-config";
+import { getPlanPrice, getPlanDefinition, PLAN_ORDER, PLAN_RANK, isPlanId } from "@/lib/shared/plan-config";
 import { getFriendlyAuthErrorMessage } from "@/lib/auth/auth-error-message";
 import { startGoogleConnectFlow } from "@/lib/gmb/google-connect";
 import { cn } from "@/lib/shared/utils";
@@ -149,7 +149,7 @@ function readStoredPreferences(): SettingsPreferences {
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { formatCurrency, dynamicPricing, currency } = useCurrency();
+  const { formatCurrency, dynamicPricing, currency, planDefinitions } = useCurrency();
 
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<ProfileRow | null>(null);
@@ -160,7 +160,7 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isSavingPreferences, setIsSavingPreferences] = useState(false);
-  const [isProcessingPlan, setIsProcessingPlan] = useState(false);
+  const [processingPlanId, setProcessingPlanId] = useState<PlanId | null>(null);
   const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
   const [profileAlert, setProfileAlert] = useState<AlertState>(null);
   const [planAlert, setPlanAlert] = useState<AlertState>(null);
@@ -173,7 +173,7 @@ export default function SettingsPage() {
 
   const isGoogleConnected = Boolean(profile?.google_connected_at);
   const hasPassword = Boolean(profile?.has_password);
-  const currentPlan = getPlanDefinition(currentPlanId);
+  const currentPlan = getPlanDefinition(currentPlanId, planDefinitions);
 
   useEffect(() => {
     const loadData = async () => {
@@ -267,9 +267,9 @@ export default function SettingsPage() {
       setProfile((prev) =>
         prev
           ? {
-              ...prev,
-              full_name: normalizedName,
-            }
+            ...prev,
+            full_name: normalizedName,
+          }
           : prev
       );
       setProfileAlert({
@@ -335,14 +335,14 @@ export default function SettingsPage() {
     if (!user) return;
 
     const shouldContinue = window.confirm(
-      `Change plan to ${PLAN_DEFINITIONS[planId].name}?`
+      `Change plan to ${getPlanDefinition(planId, planDefinitions).name}?`
     );
 
     if (!shouldContinue) {
       return;
     }
 
-    setIsProcessingPlan(true);
+    setProcessingPlanId(planId);
     setPlanAlert(null);
 
     try {
@@ -378,20 +378,21 @@ export default function SettingsPage() {
           error instanceof Error ? error.message : "Failed to update plan.",
       });
     } finally {
-      setIsProcessingPlan(false);
+      setProcessingPlanId(null);
     }
   };
 
   const handleUpgradePlan = async (planId: PlanId) => {
     if (!user) return;
 
-    setIsProcessingPlan(true);
+    setProcessingPlanId(planId);
     setPlanAlert(null);
 
     try {
       const loaded = await loadRazorpayScript();
       if (!loaded) {
-        throw new Error("Failed to load payment gateway. Please try again.");
+        console.error("Razorpay script failed to load on settings page.");
+        throw new Error("Could not connect to Razorpay. Check your internet connection or disable ad-blockers.");
       }
 
       const supabase = createClient();
@@ -411,13 +412,14 @@ export default function SettingsPage() {
         currency: order.currency,
         order_id: order.id,
         name: "Credibl5",
-        description: `${PLAN_DEFINITIONS[planId].name} Plan - ${billingCycle}`,
+        description: `${getPlanDefinition(planId, planDefinitions).name} Plan - ${billingCycle}`,
         prefill: {
           name: fullName || undefined,
           email: session.user.email ?? undefined,
         },
         theme: { color: "#0f172a" },
         handler: async (payment: RazorpayResponse) => {
+          console.log("Razorpay payment modal success callback triggered on settings page.");
           try {
             const {
               data: { session: refreshedSession },
@@ -425,6 +427,7 @@ export default function SettingsPage() {
 
             const accessToken = refreshedSession?.access_token ?? session.access_token;
 
+            console.log("Invoking backend verification from settings page...");
             const verification = await verifyPayment(accessToken, {
               razorpay_payment_id: payment.razorpay_payment_id,
               razorpay_order_id: payment.razorpay_order_id,
@@ -434,27 +437,29 @@ export default function SettingsPage() {
               currency: currency,
             });
 
+            console.log("Payment verification successful.");
             await refreshSubscription(user.id);
             setPlanAlert({
               type: "success",
               message:
                 verification.message ||
-                `Successfully upgraded to ${PLAN_DEFINITIONS[planId].name}.`,
+                `Successfully upgraded to ${getPlanDefinition(planId, planDefinitions).name}.`,
             });
           } catch (error) {
+            console.error("Verification callback failed on settings page:", error);
             setPlanAlert({
               type: "error",
               message:
                 error instanceof Error
                   ? error.message
-                  : "Payment verification failed.",
+                  : "Payment verification failed. If your money was deducted, please contact support with order ID: " + order.id,
             });
           } finally {
-            setIsProcessingPlan(false);
+            setProcessingPlanId(null);
           }
         },
         modal: {
-          ondismiss: () => setIsProcessingPlan(false),
+          ondismiss: () => setProcessingPlanId(null),
         },
       };
 
@@ -466,7 +471,7 @@ export default function SettingsPage() {
         message:
           error instanceof Error ? error.message : "Unable to start checkout.",
       });
-      setIsProcessingPlan(false);
+      setProcessingPlanId(null);
     }
   };
 
@@ -855,7 +860,7 @@ export default function SettingsPage() {
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             {PLAN_ORDER.map((planId: PlanId) => {
-              const plan = PLAN_DEFINITIONS[planId];
+              const plan = getPlanDefinition(planId, planDefinitions);
               const isCurrent = currentPlanId === planId;
               const currentRank = PLAN_RANK[currentPlanId];
               const targetRank = PLAN_RANK[planId];
@@ -932,10 +937,10 @@ export default function SettingsPage() {
                     ) : isUpgrade || isCycleSwitch ? (
                       <Button
                         onClick={() => handleUpgradePlan(planId)}
-                        disabled={isProcessingPlan || !isPaid}
+                        disabled={processingPlanId !== null || !isPaid}
                         className="h-9 w-full rounded-xl bg-slate-900 text-white hover:bg-slate-800"
                       >
-                        {isProcessingPlan ? (
+                        {processingPlanId === planId ? (
                           <>
                             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                             Processing...
@@ -950,11 +955,11 @@ export default function SettingsPage() {
                     ) : isDowngrade ? (
                       <Button
                         onClick={() => handleDowngradePlan(planId)}
-                        disabled={isProcessingPlan}
+                        disabled={processingPlanId !== null}
                         variant="outline"
                         className="h-9 w-full rounded-xl border-slate-300 bg-white hover:bg-slate-50"
                       >
-                        {isProcessingPlan ? (
+                        {processingPlanId === planId ? (
                           <>
                             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                             Updating...

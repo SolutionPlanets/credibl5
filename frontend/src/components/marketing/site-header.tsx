@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Menu, Sparkles } from "lucide-react";
+import { Menu } from "lucide-react";
 import { useState, useEffect } from "react";
 import { Button } from "../ui/button";
 import { cn } from "@/lib/shared/utils";
@@ -48,13 +48,8 @@ export function SiteHeader({
       )}
     >
       <div className="mx-auto flex max-w-[1240px] items-center justify-between gap-4 px-4 py-3 md:px-8">
-        <Link href="/" className="group inline-flex items-center gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-md shadow-indigo-500/20 transition-transform group-hover:scale-105">
-            <Sparkles className="h-4 w-4" />
-          </span>
-          <span className="text-lg font-bold tracking-tight text-slate-900">
-            Credibl5
-          </span>
+        <Link href="/" className="group inline-flex items-center gap-2">
+          <img src="/new_logo.png" alt="Credibl5" className="h-10 w-auto object-contain transition-transform group-hover:scale-105" />
         </Link>
 
         <nav
@@ -117,11 +112,8 @@ export function SiteHeader({
               <DialogContent className="left-auto right-0 top-0 h-svh w-[85vw] max-w-[380px] translate-x-0 translate-y-0 rounded-none border-l border-slate-200 bg-white p-6 shadow-2xl">
                 <DialogTitle className="sr-only">Menu</DialogTitle>
                 <div className="flex h-full flex-col">
-                  <div className="mb-8 inline-flex items-center gap-3">
-                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-md shadow-indigo-500/20">
-                      <Sparkles className="h-4 w-4" />
-                    </span>
-                    <span className="text-lg font-bold text-slate-900">Credibl5</span>
+                  <div className="mb-8 inline-flex items-center gap-2">
+                    <img src="/new_logo.png" alt="Credibl5" className="h-10 w-auto object-contain" />
                   </div>
 
                   <nav aria-label="Mobile Header" className="flex flex-col gap-2">

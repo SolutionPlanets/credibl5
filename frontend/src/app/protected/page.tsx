@@ -22,6 +22,7 @@ import { storeReviews, getReviewsByLocations } from "@/lib/review-store";
 import type { StoredReview } from "@/lib/review-store";
 import { cn } from "@/lib/shared/utils";
 import { getPlanDefinition } from "@/lib/shared/plan-config";
+import { useCurrency } from "@/lib/shared/currency-context";
 import { ConnectGoogleButton } from "@/components/protected/connect-google-button";
 import { GMBStatusAlert } from "@/components/protected/gmb-status-alert";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -41,6 +42,9 @@ type SubscriptionRow = {
   plan_type: string | null;
   current_period_start: string | null;
   current_period_end: string | null;
+  total_ai_credits: number | null;
+  ai_credits_used: number | null;
+  remaining_ai_credits: number | null;
 };
 
 type LocationRow = {
@@ -121,6 +125,7 @@ export default function ProtectedPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { setPendingCount } = usePendingReviews();
+  const { planDefinitions } = useCurrency();
   const [user, setUser] = useState<User | null>(null);
   const [profileData, setProfileData] = useState<ProfileRow | null>(null);
   const [subscriptionData, setSubscriptionData] = useState<SubscriptionRow | null>(null);
@@ -174,7 +179,7 @@ export default function ProtectedPage() {
             .order("created_at", { ascending: false }),
           supabase
             .from("subscription_plans")
-            .select("plan_type,current_period_start,current_period_end")
+            .select("plan_type,current_period_start,current_period_end,total_ai_credits,ai_credits_used,remaining_ai_credits")
             .eq("user_id", nextUser.id)
             .maybeSingle(),
         ]);
@@ -393,19 +398,10 @@ export default function ProtectedPage() {
 
   const replyRate = totalReviews === 0 ? 0 : Math.round((repliedCount / totalReviews) * 100);
 
-  const currentPlan = getPlanDefinition(subscriptionData?.plan_type);
-  const creditLimit = Math.max(currentPlan.AiCredits, 0);
-  const periodStart = parseDate(subscriptionData?.current_period_start);
-  const periodRepliesUsed = useMemo(() => {
-    return reviews.filter((review) => {
-      if (!review.review_reply?.trim()) return false;
-      if (!periodStart) return true;
-      const compareDate = parseDate(review.synced_at) ?? parseDate(review.review_date);
-      return Boolean(compareDate && compareDate >= periodStart);
-    }).length;
-  }, [periodStart, reviews]);
-  const creditsUsed = periodRepliesUsed;
-  const creditsRemaining = Math.max(creditLimit - creditsUsed, 0);
+  const currentPlan = getPlanDefinition(subscriptionData?.plan_type, planDefinitions);
+  const creditLimit = subscriptionData?.total_ai_credits ?? Math.max(currentPlan.AiCredits, 0);
+  const creditsUsed = subscriptionData?.ai_credits_used ?? 0;
+  const creditsRemaining = subscriptionData?.remaining_ai_credits ?? Math.max(creditLimit - creditsUsed, 0);
   const creditUsagePercent = creditLimit > 0 ? Math.min(100, Math.round((creditsUsed / creditLimit) * 100)) : 0;
   const periodEndLabel = formatDate(subscriptionData?.current_period_end ?? null);
 

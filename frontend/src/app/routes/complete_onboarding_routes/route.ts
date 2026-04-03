@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createAdminClient, createClient } from "@/lib/supabase/server";
 import { rateLimit, getIP } from "@/lib/rate-limit";
-import { createPlanDates, getStoredBillingCycle, getPlanCreditLimit, getPlanLocationLimit, isPlanId } from "@/lib/shared/plan-config";
+import { createPlanDates, getStoredBillingCycle, isPlanId } from "@/lib/shared/plan-config";
+import { getServerPlanDefinition } from "@/lib/shared/plan-server";
 import type { BillingCycle } from "@/lib/shared/plan-config";
 
 const limiter = rateLimit({ interval: 60_000, limit: 10 });
@@ -93,17 +94,18 @@ export async function POST(request: Request) {
     if (planId && isPlanId(planId)) {
       const cycle = (dbRow.billing_cycle as BillingCycle) || "monthly";
       const { startDate, endDate } = createPlanDates(planId, cycle);
+      const planDef = await getServerPlanDefinition(planId);
 
       const subscriptionRow: Record<string, unknown> = {
         user_id: user.id,
         email: user.email ?? null,
         plan_type: planId,
-        max_locations: getPlanLocationLimit(planId),
+        max_locations: planDef.maxLocations,
         billing_cycle: getStoredBillingCycle(planId, cycle),
         status: planId === "free" ? "trial" : "active",
         current_period_start: startDate.toISOString(),
         current_period_end: endDate.toISOString(),
-        total_ai_credits: getPlanCreditLimit(planId),
+        total_ai_credits: planDef.AiCredits,
         ai_credits_used: 0,
         ai_credits_refreshed_at: new Date().toISOString(),
       };

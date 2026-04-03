@@ -44,10 +44,8 @@ export function SiteFooter() {
       <div className="relative mx-auto max-w-[1240px] px-6 pb-8 pt-16 md:px-8">
         <div className="grid gap-12 lg:grid-cols-5">
           <div className="lg:col-span-2">
-            <Link href="/" className="inline-flex items-center gap-3">
-              <span className="text-2xl font-extrabold tracking-tight text-slate-900">
-                Credibl5
-              </span>
+            <Link href="/" className="inline-flex items-center gap-2">
+              <img src="/new_logo.png" alt="Credibl5" className="h-10 w-auto object-contain" />
             </Link>
 
             <p className="mt-5 max-w-md text-sm leading-relaxed text-slate-600">

@@ -44,7 +44,12 @@ class Settings(BaseSettings):
     google_service_account_file: str | None = Field(default=None, alias="GOOGLE_SERVICE_ACCOUNT_FILE")
 
     google_gemini_api_key: str | None = Field(default=None, alias="GOOGLE_GEMINI_API_KEY")
+    vite_google_ai_api_key: str | None = Field(default=None, alias="VITE_GOOGLE_AI_API_KEY")
     cron_secret: str = Field(default="dev-only-change-this-secret", alias="CRON_SECRET")
+
+    @property
+    def gemini_api_key(self) -> str | None:
+        return self.google_gemini_api_key or self.vite_google_ai_api_key
 
     @property
     def service_role_key(self) -> str:

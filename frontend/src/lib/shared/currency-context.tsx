@@ -1,7 +1,13 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import React, { createContext, useContext, useEffect, useState, useMemo, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  type PlanId,
+  type PlanDefinition,
+  type AddonPack,
+  buildPlanDefinitions,
+} from "@/lib/shared/plan-config";
 
 type CurrencyCode = "USD" | "INR";
 
@@ -14,12 +20,20 @@ interface PricingData {
   };
 }
 
+interface PricingApiResponse {
+  plans?: Record<string, unknown>;
+  addons?: AddonPack[];
+  pricing?: PricingData;
+}
+
 interface CurrencyContextType {
   currency: CurrencyCode;
   locale: string;
   symbol: string;
   formatCurrency: (amount: number) => string;
   dynamicPricing: PricingData | null;
+  planDefinitions: Record<PlanId, PlanDefinition> | null;
+  addonPacks: AddonPack[] | null;
   isLoading: boolean;
 }
 
@@ -91,16 +105,30 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Fetch dynamic pricing from backend
-  const { data: dynamicPricing, isLoading } = useQuery<PricingData>({
+  // Fetch enriched pricing from backend (plans + addons + backward-compat pricing)
+  const { data: apiResponse, isLoading } = useQuery<PricingApiResponse>({
     queryKey: ["pricing"],
     queryFn: async () => {
       const res = await fetch(`${BACKEND_URL}/pricing`);
       if (!res.ok) throw new Error("Failed to fetch pricing");
       return res.json();
     },
-    staleTime: 1000 * 60 * 30, // 30 minutes
+    staleTime: 0, // always fetch fresh plan data from Supabase
   });
+
+  // Extract backward-compatible dynamicPricing
+  const dynamicPricing = apiResponse?.pricing ?? null;
+
+  // Build planDefinitions from the enriched plans response
+  const planDefinitions = useMemo(() => {
+    if (!apiResponse?.plans) return null;
+    return buildPlanDefinitions(
+      apiResponse.plans as Record<string, Parameters<typeof buildPlanDefinitions>[0][string]>
+    );
+  }, [apiResponse?.plans]);
+
+  // Extract addon packs
+  const addonPacks = apiResponse?.addons ?? null;
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat(locale, {
@@ -117,7 +145,9 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
         locale,
         symbol,
         formatCurrency,
-        dynamicPricing: dynamicPricing || null,
+        dynamicPricing,
+        planDefinitions,
+        addonPacks,
         isLoading,
       }}
     >

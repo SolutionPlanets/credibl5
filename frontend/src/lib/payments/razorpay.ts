@@ -64,6 +64,7 @@ export async function createOrder(
   billingCycle: BillingCycle,
   currency: string = "USD"
 ): Promise<{ id: string; amount: number; currency: string }> {
+  console.log(`Creating Razorpay order for plan ${planType}, cycle ${billingCycle}, currency ${currency}`);
   const res = await fetch(`${BACKEND_URL}/payments/create-order`, {
     method: "POST",
     headers: {
@@ -75,10 +76,13 @@ export async function createOrder(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Failed to create order" }));
-    throw new Error(err.detail ?? "Failed to create order");
+    console.error("Razorpay order creation failed:", err);
+    throw new Error(err.detail ?? "Failed to create order. Please check your internet connection.");
   }
 
-  return res.json();
+  const order = await res.json();
+  console.log("Successfully created Razorpay order:", order.id);
+  return order;
 }
 
 export async function verifyPayment(
@@ -98,6 +102,7 @@ export async function verifyPayment(
   payment_currency?: string;
   message?: string;
 }> {
+  console.log(`Verifying payment signature for order: ${data.razorpay_order_id}`);
   const res = await fetch(`${BACKEND_URL}/payments/verify-payment`, {
     method: "POST",
     headers: {
@@ -109,8 +114,11 @@ export async function verifyPayment(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Payment verification failed" }));
-    throw new Error(err.detail ?? err.error ?? "Payment verification failed");
+    console.error("Payment verification failed:", err);
+    throw new Error(err.detail ?? err.error ?? "Payment verification failed. If your money was deducted, please contact support.");
   }
 
-  return res.json();
+  const result = await res.json();
+  console.log("Payment verified successfully:", result);
+  return result;
 }

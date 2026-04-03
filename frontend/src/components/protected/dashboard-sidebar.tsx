@@ -122,18 +122,11 @@ export function DashboardSidebar({
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(110%_85%_at_0%_0%,rgba(var(--sidebar-accent),0.14)_0%,transparent_55%),radial-gradient(105%_80%_at_100%_100%,rgba(var(--sidebar-accent-soft),0.1)_0%,transparent_60%)]" />
         <div className="pointer-events-none absolute -left-24 top-20 h-72 w-72 rounded-full bg-reply-blue/10 blur-[88px]" />
         <div className="pointer-events-none absolute -right-24 bottom-8 h-72 w-72 rounded-full bg-reply-purple/10 blur-[92px]" />
-        <div className="pointer-events-none absolute inset-x-0 top-[5.4rem] h-px bg-gradient-to-r from-transparent via-slate-300/80 to-transparent" />
+        <div className="pointer-events-none absolute inset-x-0 top-[4.25rem] h-px bg-gradient-to-r from-transparent via-slate-300/80 to-transparent" />
 
-        <div className="relative z-10 flex h-[4.85rem] items-center justify-between border-b border-slate-200/80 px-4 lg:h-[4.65rem]">
-          <Link href="/protected" className="flex items-center gap-3">
-            <div className="relative flex size-10 items-center justify-center rounded-xl border border-white/70 bg-[linear-gradient(145deg,rgba(88,125,254,0.95),rgba(151,71,255,0.9))] shadow-[0_16px_28px_-18px_rgba(88,125,254,0.75)]">
-              <div className="absolute inset-1 rounded-lg border border-white/45" />
-              <span className="relative text-[1.05rem] font-bold leading-none text-white">C</span>
-            </div>
-            <div>
-              <span className="block text-[1.65rem] font-semibold tracking-tight text-slate-900 lg:text-[1.35rem]">Credibl5</span>
-              <span className="block text-[10px] font-medium uppercase tracking-[0.22em] text-reply-purple/85">Review Ops</span>
-            </div>
+        <div className="relative z-10 flex h-[4.25rem] items-center justify-between border-b border-slate-200/80 px-4 lg:h-[4rem]">
+          <Link href="/protected" className="flex items-center gap-2">
+            <img src="/new_logo.png" alt="Credibl5" className="h-10 w-auto object-contain" />
           </Link>
           <button
             onClick={onClose}
@@ -211,6 +204,7 @@ export function DashboardSidebar({
             })}
           </nav>
 
+          {/* Settings - commented out for now
           <nav className="space-y-1.5">
             <p className={sectionLabelClass}>Support</p>
             <SidebarNavLink
@@ -221,8 +215,10 @@ export function DashboardSidebar({
               onNavigate={handleMobileNavigate}
             />
           </nav>
+          */}
         </div>
 
+        {/* Sign Out - commented out for now
         <div className="relative z-10 border-t border-slate-200/80 bg-white/40 p-3">
           <form action="/routes/signout_routes" method="POST">
             <button
@@ -236,6 +232,7 @@ export function DashboardSidebar({
             </button>
           </form>
         </div>
+        */}
       </aside>
     </>
   );

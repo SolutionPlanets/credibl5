@@ -16,7 +16,7 @@ from typing import List, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.deps import get_bearer_token, get_supabase_gateway
+from app.core.deps import get_bearer_token, get_supabase_gateway, require_ai_credits, AI_CREDIT_COSTS
 from app.core.supabase_gateway import SupabaseGateway
 
 
@@ -200,7 +200,7 @@ def _parse_gemini_response(raw: str) -> List[GeneratedTemplate]:
 @router.post("/generate", response_model=TemplateGenerateResponse)
 async def generate_templates(
     body: TemplateGenerateRequest,
-    token: str = Depends(get_bearer_token),
+    credit_check: dict = Depends(require_ai_credits(AI_CREDIT_COSTS["template_generation"])),
     gateway: SupabaseGateway = Depends(get_supabase_gateway),
 ) -> TemplateGenerateResponse:
     """
@@ -208,10 +208,7 @@ async def generate_templates(
     using Gemini AI, guided by the brand voice form data and an optional
     free-text prompt from the user.
     """
-    # Validate the caller's session
-    user = gateway.get_user_from_access_token(token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+    user = credit_check["user"]
 
     api_key = (
         os.environ.get("GOOGLE_GEMINI_API_KEY")
@@ -224,20 +221,22 @@ async def generate_templates(
         )
 
     try:
-        import google.generativeai as genai  # lazy import — avoids crash if not yet installed
+        from google import genai  # lazy import — avoids crash if not yet installed
     except ModuleNotFoundError:
         raise HTTPException(
             status_code=500,
-            detail="google-generativeai package is not installed. Run: pip install google-generativeai",
+            detail="google-genai package is not installed. Run: pip install google-genai",
         )
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    client = genai.Client(api_key=api_key)
 
     prompt = _build_prompt(body)
 
     try:
-        result = model.generate_content(prompt)
+        result = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+        )
         templates = _parse_gemini_response(result.text)
     except json.JSONDecodeError as exc:
         raise HTTPException(
@@ -255,5 +254,15 @@ async def generate_templates(
             status_code=502,
             detail=f"Expected 3 templates, got {len(templates)}.",
         )
+
+    # Deduct credit and log usage after successful generation
+    await gateway.deduct_ai_credits(user.id, AI_CREDIT_COSTS["template_generation"])
+    await gateway.log_ai_usage(
+        user_id=user.id,
+        action_type="template_generation",
+        credits_used=AI_CREDIT_COSTS["template_generation"],
+        model_name="gemini-2.5-flash-lite",
+        request_meta={"source": "template_generate", "templates_count": len(templates)},
+    )
 
     return TemplateGenerateResponse(templates=templates)

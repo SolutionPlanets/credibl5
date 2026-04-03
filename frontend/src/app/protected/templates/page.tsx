@@ -25,6 +25,7 @@ import { BrandVoiceForm } from "@/components/protected/brand-voice-form";
 import type { BrandVoiceRow } from "@/components/protected/brand-voice-form";
 import { generateMockTemplates } from "@/lib/mock-template-generator";
 import type { GeneratedTemplate } from "@/lib/mock-template-generator";
+import { showInsufficientCredits, showCreditDeducted } from "@/lib/credit-alerts";
 
 interface LocationRow {
   id: string;
@@ -231,12 +232,27 @@ export default function TemplatesPage() {
     setIsGenerating(true);
     setErrorMessage(null);
 
-    const gateRes = await fetch("/routes/ai_generate_routes", { method: "POST" });
+    const gateRes = await fetch("/routes/ai_generate_routes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ location_id: selectedLocationId }),
+    });
+    const gateBody = await gateRes.json().catch(() => ({}));
     if (!gateRes.ok) {
-      const body = await gateRes.json().catch(() => ({}));
-      setErrorMessage(body.error ?? "Too many generation requests. Please wait before generating again.");
+      if (gateRes.status === 402 || gateBody.code === "INSUFFICIENT_CREDITS") {
+        showInsufficientCredits();
+        setErrorMessage("Insufficient AI credits. Purchase more credits or upgrade your plan.");
+      } else {
+        setErrorMessage(gateBody.error ?? "Too many generation requests. Please wait before generating again.");
+      }
       setIsGenerating(false);
       return;
+    }
+
+    // Credit was deducted — show toast with remaining
+    const creditsRemaining = gateBody.remaining_ai_credits;
+    if (typeof creditsRemaining === "number") {
+      showCreditDeducted(creditsRemaining);
     }
 
     setTimeout(() => {

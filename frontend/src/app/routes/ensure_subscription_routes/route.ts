@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient, createClient } from "@/lib/supabase/server";
-import { createPlanDates, getStoredBillingCycle } from "@/lib/shared/plan-config";
+import { createPlanDates, getStoredBillingCycle, FREE_PLAN_DEFAULTS } from "@/lib/shared/plan-config";
 import { rateLimit, getIP } from "@/lib/rate-limit";
 
 const limiter = rateLimit({ interval: 60_000, limit: 5 });
@@ -54,14 +54,14 @@ export async function POST(request: Request) {
       user_id: user.id,
       email: user.email ?? null,
       plan_type: "free",
-      max_locations: 1,
+      max_locations: FREE_PLAN_DEFAULTS.maxLocations,
       billing_cycle: getStoredBillingCycle("free", "monthly"),
       status: "trial",
       amount_paid_cents: 0,
       payment_currency: "USD",
       current_period_start: startDate.toISOString(),
       current_period_end: endDate.toISOString(),
-      total_ai_credits: 50,
+      total_ai_credits: FREE_PLAN_DEFAULTS.AiCredits,
       ai_credits_used: 0,
       ai_credits_refreshed_at: new Date().toISOString(),
     });

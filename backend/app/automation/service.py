@@ -6,6 +6,7 @@ Called by the cron endpoint to process automation rules.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,8 @@ from app.core.settings import Settings
 from app.core.supabase_gateway import SupabaseGateway
 from app.gmb.oauth import GoogleOAuthService
 from app.gmb.helper import upsert_gmb_review_reply
+from app.templates.review_reply_prompt import build_review_reply_prompt, ensure_sign_off, parse_reply_output, sanitize_reply
+from app.templates.escalation import check_escalation
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +230,27 @@ async def _execute_reply(
 
     business_name = location.get("location_name", "our business")
 
+    # Escalation pre-check for AI replies (skip volatile reviews)
+    if response_settings.get("type", "ai") == "ai":
+        review_text = review.get("review_text", "")
+        escalation = check_escalation(review_text)
+        if escalation.should_escalate:
+            logger.warning(
+                "[AutoReply] Review %s escalated: %s",
+                review.get("id", "?"), escalation.reason,
+            )
+            await _log_auto_reply(
+                settings,
+                user_id=user_id,
+                rule_id=rule["id"],
+                location_id=location_id,
+                review_id=review.get("id"),
+                rule_name=rule.get("name"),
+                action="skipped_escalation",
+                error_message=escalation.reason,
+            )
+            return False
+
     # Generate reply text
     reply_text = ""
     if response_settings.get("type") == "template" and response_settings.get("template_id"):
@@ -308,7 +332,10 @@ async def _execute_reply(
 
     # Track AI credit usage (only for AI-generated replies)
     if response_settings.get("type", "ai") == "ai":
-        await _track_credit_usage(settings, user_id, location_id, review.get("id"))
+        await _track_credit_usage(
+            settings, gateway, user_id, location_id, review.get("id"),
+            review=review, reply_text=reply_text,
+        )
 
     # Log success
     await _log_auto_reply(
@@ -366,16 +393,15 @@ async def _generate_ai_reply(
     business_name: str,
 ) -> str:
     """Generate a review reply using Google Gemini with brand voice context."""
-    api_key = settings.google_gemini_api_key
+    api_key = settings.gemini_api_key
     if not api_key:
         logger.error("[AutoReply] No Gemini API key configured.")
         return ""
 
     # Lazy import to avoid startup cost
-    import google.generativeai as genai
+    from google import genai
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    client = genai.Client(api_key=api_key)
 
     # Fetch brand voice for this location
     location_id = rule["location_id"]
@@ -383,42 +409,41 @@ async def _generate_ai_reply(
     bv = await _fetch_brand_voice(settings, user_id, location_id)
 
     response_settings = rule.get("response_settings", {})
-    tone = response_settings.get("tone", bv.get("tone", "professional"))
     custom_instructions = response_settings.get("custom_instructions", "")
-    reply_length = bv.get("preferred_response_length", "medium")
 
-    prompt = f"""Write a reply to this customer review for {business_name}.
+    # Override tone from rule settings if provided
+    if response_settings.get("tone"):
+        bv = {**bv, "tone": response_settings["tone"]}
 
-Reviewer: {review.get("reviewer_name", "Customer")}
-Rating: {review.get("star_rating", "N/A")} stars
-Review: "{review.get("review_text", "")}"
-
-Brand Voice Guidelines:
-- Business Type: {bv.get("industry", "Local Business")}
-- Tone: {tone}
-- Length: {reply_length}
-- Key Phrases to use: {", ".join(bv.get("key_phrases", [])) or "N/A"}
-- Phrases to avoid: {", ".join(bv.get("phrases_to_avoid", [])) or "N/A"}
-- Sign-off: {bv.get("signature_signoff", "")}
-
-{f"Additional instructions: {custom_instructions}" if custom_instructions else ""}
-
-Rules:
-- Address the reviewer by their first name.
-- Be genuine and specific to their review.
-- Keep the response concise and {reply_length}.
-- No placeholder text in the final response.
-- Do not use markdown formatting.
-"""
+    prompt = build_review_reply_prompt(
+        business_name=business_name,
+        reviewer_name=review.get("reviewer_name", "Customer"),
+        star_rating=review.get("star_rating", "N/A"),
+        review_text=review.get("review_text", ""),
+        brand_voice=bv,
+        custom_instructions=custom_instructions or None,
+        support_contact=bv.get("support_contact"),
+        allow_emojis=bv.get("allow_emojis", False),
+    )
 
     try:
-        result = model.generate_content(prompt)
-        reply = result.text.strip()
+        result = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+        )
+        raw_output = result.text.strip()
 
-        # Ensure sign-off is included
-        sign_off = bv.get("signature_signoff", "").strip()
-        if sign_off and sign_off.lower() not in reply.lower():
-            reply = f"{reply}\n\n{sign_off}"
+        # Check if LLM triggered escalation (nuanced cases regex missed)
+        parsed = parse_reply_output(raw_output)
+        if parsed["escalated"]:
+            logger.warning(
+                "[AutoReply] Review %s escalated by LLM: %s",
+                review.get("id", "?"), parsed["reason"],
+            )
+            return ""
+
+        reply = sanitize_reply(parsed["reply"])
+        reply = ensure_sign_off(reply, bv)
 
         return reply
     except Exception as e:
@@ -456,55 +481,34 @@ async def _fetch_brand_voice(
 
 async def _track_credit_usage(
     settings: Settings,
+    gateway: SupabaseGateway,
     user_id: str,
     location_id: str,
     review_id: Optional[str],
+    review: Optional[Dict[str, Any]] = None,
+    reply_text: Optional[str] = None,
 ) -> None:
-    """Insert AI usage log and increment credits_used on subscription_plans."""
-    headers = {
-        "apikey": settings.service_role_key,
-        "Authorization": f"Bearer {settings.service_role_key}",
-        "Content-Type": "application/json",
-    }
+    """Atomically deduct 1 AI credit and log usage."""
+    await gateway.deduct_ai_credits(user_id, 1)
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        # Insert usage log
-        await client.post(
-            f"{settings.supabase_url}/rest/v1/ai_usage_logs",
-            headers=headers,
-            json=[{
-                "organization_id": user_id,
-                "location_id": location_id,
-                "review_id": review_id,
-                "model_name": "gemini-2.0-flash",
-                "action_type": "auto_reply_draft",
-                "credits_used": 1,
-                "request_meta_json": {"source": "auto_reply_job"},
-            }],
-        )
+    meta: Dict[str, Any] = {"source": "auto_reply_job"}
+    if review:
+        meta["star_rating"] = review.get("star_rating")
+        meta["review_text"] = review.get("review_text")
+    if reply_text:
+        meta["generated_reply"] = reply_text
 
-        # Increment ai_credits_used on subscription_plans
-        # First fetch current value
-        plan_resp = await client.get(
-            f"{settings.supabase_url}/rest/v1/subscription_plans",
-            headers={
-                "apikey": settings.service_role_key,
-                "Authorization": f"Bearer {settings.service_role_key}",
-            },
-            params={
-                "select": "ai_credits_used",
-                "user_id": f"eq.{user_id}",
-                "limit": "1",
-            },
-        )
-        if plan_resp.status_code < 400 and plan_resp.json():
-            current_used = plan_resp.json()[0].get("ai_credits_used", 0)
-            await client.patch(
-                f"{settings.supabase_url}/rest/v1/subscription_plans",
-                headers=headers,
-                params={"user_id": f"eq.{user_id}"},
-                json={"ai_credits_used": current_used + 1},
-            )
+    await gateway.log_ai_usage(
+        user_id=user_id,
+        action_type="auto_reply_draft",
+        credits_used=1,
+        location_id=location_id,
+        review_id=review.get("gmb_review_id") if review else review_id,
+        review_response_id=str(uuid.uuid4()),
+        reviewer_name=review.get("reviewer_name") if review else None,
+        model_name="gemini-2.5-flash-lite",
+        request_meta=meta,
+    )
 
 
 # ---------------------------------------------------------------------------

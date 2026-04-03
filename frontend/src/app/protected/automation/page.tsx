@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/shared/utils";
 import { getPlanDefinition } from "@/lib/shared/plan-config";
+import { useCurrency } from "@/lib/shared/currency-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +38,8 @@ import {
 } from "@/lib/automation/api";
 
 import { AutomationRuleDialog } from "@/components/protected/automation-rule-dialog";
+import { showInsufficientCredits } from "@/lib/credit-alerts";
+import { useCredits } from "@/lib/credits-context";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -92,7 +95,8 @@ function formatDate(value: string | null): string {
 
 function AutomationUpgradePrompt() {
   const router = useRouter();
-  const proPlan = getPlanDefinition("growth");
+  const { planDefinitions } = useCurrency();
+  const proPlan = getPlanDefinition("growth", planDefinitions);
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center px-4 text-center">
       <div className="mb-6 flex size-20 items-center justify-center rounded-3xl border border-reply-purple/20 bg-reply-purple/10">
@@ -133,13 +137,17 @@ function AutomationUpgradePrompt() {
 
 export default function AutomationPage() {
   const router = useRouter();
+  const { planDefinitions } = useCurrency();
 
   // Core state
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [locations, setLocations] = useState<LocationRow[]>([]);
   const [rules, setRules] = useState<AutoReplyRule[]>([]);
   const [stats, setStats] = useState<AutomationStats | null>(null);
-  const [credits, setCredits] = useState<CreditInfo | null>(null);
+  const { credits: sharedCredits, setCredits: setSharedCredits } = useCredits();
+  const credits: CreditInfo | null = sharedCredits.total > 0 || sharedCredits.used > 0
+    ? { total_ai_credits: sharedCredits.total, ai_credits_used: sharedCredits.used, remaining_ai_credits: sharedCredits.remaining }
+    : null;
   const [planType, setPlanType] = useState<string>("free");
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
 
@@ -200,14 +208,14 @@ export default function AutomationPage() {
 
       const currentPlanType = planData?.plan_type ?? "free";
       setPlanType(currentPlanType);
-      const plan = getPlanDefinition(currentPlanType);
+      const plan = getPlanDefinition(currentPlanType, planDefinitions);
       setAutoReplyEnabled(plan.autoReplyEnabled);
 
       if (planData) {
-        setCredits({
-          total_ai_credits: planData.total_ai_credits ?? 0,
-          ai_credits_used: planData.ai_credits_used ?? 0,
-          remaining_ai_credits: planData.remaining_ai_credits ?? 0,
+        setSharedCredits({
+          total: planData.total_ai_credits ?? 0,
+          used: planData.ai_credits_used ?? 0,
+          remaining: planData.remaining_ai_credits ?? 0,
         });
       }
 
@@ -253,8 +261,12 @@ export default function AutomationPage() {
       const updated = await apiToggleRule(accessToken, ruleId, newState);
       setRules((prev) => prev.map((r) => (r.id === ruleId ? updated : r)));
       setSuccessMessage(`Rule ${newState ? "activated" : "paused"}.`);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to toggle rule.");
+    } catch (error: any) {
+      const msg = error?.message || "Failed to toggle rule.";
+      if (msg.includes("INSUFFICIENT_CREDITS") || msg.includes("402")) {
+        showInsufficientCredits();
+      }
+      setErrorMessage(msg);
     } finally {
       setTogglingRuleId(null);
     }
@@ -382,8 +394,21 @@ export default function AutomationPage() {
               {showLogs ? "Hide Activity" : "View Activity"}
             </Button>
             <Button
-              onClick={() => { setEditingRule(null); setIsDialogOpen(true); }}
-              className="gap-2 bg-reply-purple hover:bg-reply-purple/90"
+              onClick={() => {
+                if (credits && credits.remaining_ai_credits <= 0) {
+                  showInsufficientCredits();
+                  return;
+                }
+                setEditingRule(null);
+                setIsDialogOpen(true);
+              }}
+              className={cn(
+                "gap-2",
+                credits && credits.remaining_ai_credits <= 0
+                  ? "bg-slate-400 cursor-not-allowed hover:bg-slate-400"
+                  : "bg-reply-purple hover:bg-reply-purple/90"
+              )}
+              title={credits && credits.remaining_ai_credits <= 0 ? "No AI credits remaining" : undefined}
             >
               <Plus className="h-4 w-4" /> New Rule
             </Button>
@@ -540,8 +565,21 @@ export default function AutomationPage() {
               </p>
               {rules.length === 0 ? (
                 <Button
-                  onClick={() => { setEditingRule(null); setIsDialogOpen(true); }}
-                  className="gap-2 bg-reply-purple hover:bg-reply-purple/90"
+                  onClick={() => {
+                    if (credits && credits.remaining_ai_credits <= 0) {
+                      showInsufficientCredits();
+                      return;
+                    }
+                    setEditingRule(null);
+                    setIsDialogOpen(true);
+                  }}
+                  className={cn(
+                    "gap-2",
+                    credits && credits.remaining_ai_credits <= 0
+                      ? "bg-slate-400 cursor-not-allowed hover:bg-slate-400"
+                      : "bg-reply-purple hover:bg-reply-purple/90"
+                  )}
+                  title={credits && credits.remaining_ai_credits <= 0 ? "No AI credits remaining" : undefined}
                 >
                   <Plus className="h-4 w-4" /> Create Rule
                 </Button>

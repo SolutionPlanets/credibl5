@@ -7,10 +7,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   Menu, Search, Bell, HelpCircle, MapPin, CheckCircle2,
   Sparkles, Star, Settings, LogOut, ChevronDown, X,
-  MessageSquare, Zap, TrendingUp, BookOpen,
+  MessageSquare, Zap, TrendingUp, BookOpen, AlertTriangle,
 } from "lucide-react";
 import { DashboardSidebar } from "@/components/protected/dashboard-sidebar";
 import { PendingReviewsProvider } from "@/lib/pending-reviews-context";
+import { CreditProvider } from "@/lib/credits-context";
+import { checkAndAlertCredits } from "@/lib/credit-alerts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +66,7 @@ export default function ProtectedLayout({
   // AI Credits (real-time via Supabase realtime)
   const [totalCredits, setTotalCredits] = useState<number | null>(null);
   const [remainingCredits, setRemainingCredits] = useState<number | null>(null);
+  const [creditBannerDismissed, setCreditBannerDismissed] = useState(false);
 
   // Location picker
   const [isLocationsOpen, setIsLocationsOpen] = useState(false);
@@ -179,10 +182,13 @@ export default function ProtectedLayout({
       const used = subscriptionRes.data?.ai_credits_used ?? 0;
       const remaining = subscriptionRes.data?.remaining_ai_credits;
       setTotalCredits(total);
-      setRemainingCredits(
-        typeof remaining === "number" ? Math.max(remaining, 0) : Math.max(total - used, 0)
-      );
+      const resolvedRemaining =
+        typeof remaining === "number" ? Math.max(remaining, 0) : Math.max(total - used, 0);
+      setRemainingCredits(resolvedRemaining);
       setLoading(false);
+
+      // Show one-time credit alert if low or exhausted
+      checkAndAlertCredits(resolvedRemaining, total);
 
       // Fetch unread review notifications
       fetchNotifications(supabase);
@@ -414,6 +420,14 @@ export default function ProtectedLayout({
   // ---------------------------------------------------------------------------
   return (
     <PendingReviewsProvider>
+    <CreditProvider
+      userId={user?.id ?? null}
+      initialCredits={{
+        total: totalCredits ?? 0,
+        used: (totalCredits ?? 0) - (remainingCredits ?? 0),
+        remaining: remainingCredits ?? 0,
+      }}
+    >
       <div className="flex h-svh overflow-hidden bg-slate-50 text-reply-navy">
         <DashboardSidebar
           isOpen={isSidebarOpen}
@@ -428,7 +442,7 @@ export default function ProtectedLayout({
           {/* ================================================================
               TOP HEADER
           ================================================================ */}
-          <header className="z-30 flex h-20 flex-shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/95 px-3 shadow-[0_1px_0_rgba(15,23,42,0.04)] backdrop-blur-xl sm:px-5 lg:px-6">
+          <header className="z-30 flex h-16 flex-shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/95 px-3 shadow-[0_1px_0_rgba(15,23,42,0.04)] backdrop-blur-xl sm:px-5 lg:px-6">
 
             {/* ---- LEFT: hamburger + search + location picker ---- */}
             <div className="flex h-full min-w-0 flex-1 items-center gap-2.5">
@@ -550,7 +564,7 @@ export default function ProtectedLayout({
                 )}
               </div>
 
-              {/* Location picker */}
+              {/* Location picker - commented out for now
               <div ref={locationsRef} className="relative hidden sm:block">
                 <button
                   onClick={() => setIsLocationsOpen(!isLocationsOpen)}
@@ -623,12 +637,13 @@ export default function ProtectedLayout({
                   </div>
                 )}
               </div>
+              */}
             </div>
 
             {/* ---- RIGHT: credits + notifications + help + profile ---- */}
             <div className="flex items-center gap-1.5 pl-2 sm:gap-2">
 
-              {/* AI Credits badge - links to settings/billing */}
+              {/* AI Credits navbar badge - commented out, kept in profile dropdown
               <button
                 onClick={() => router.push("/protected/settings")}
                 title={`${creditsLabel} of ${totalCreditsLabel} credits remaining`}
@@ -653,6 +668,7 @@ export default function ProtectedLayout({
                   />
                 </div>
               </button>
+              */}
               {/* Notifications */}
               <div ref={notificationsRef} className="relative">
                 <button
@@ -942,11 +958,34 @@ export default function ProtectedLayout({
               <div className="absolute bottom-[10%] right-[5%] w-[30%] h-[30%] bg-sky-100/20 blur-[100px] rounded-full" />
             </div>
             <div className="relative z-10 mx-auto max-w-7xl p-4 sm:p-6 lg:p-10">
+              {/* Zero-credit persistent banner */}
+              {remainingCredits === 0 && totalCredits !== null && totalCredits > 0 && !creditBannerDismissed && (
+                <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 shadow-sm">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-red-500" />
+                  <span className="font-medium">Your AI credits are exhausted.</span>
+                  <span className="text-red-600">AI-powered features are paused until you top up.</span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <button
+                      onClick={() => router.push("/protected/settings")}
+                      className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 transition-colors"
+                    >
+                      Buy Credits
+                    </button>
+                    <button
+                      onClick={() => setCreditBannerDismissed(true)}
+                      className="rounded-lg border border-red-200 px-2 py-1.5 text-xs text-red-600 hover:bg-red-100 transition-colors"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
               {children}
             </div>
           </main>
         </div>
       </div>
+    </CreditProvider>
     </PendingReviewsProvider>
   );
 }

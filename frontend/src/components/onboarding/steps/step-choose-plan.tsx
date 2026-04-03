@@ -6,7 +6,7 @@ import { Check, CreditCard, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/shared/utils";
 import {
-  PLAN_DEFINITIONS,
+  getPlanDefinition,
   getPlanPrice,
   type BillingCycle,
   type PlanId,
@@ -42,15 +42,16 @@ export function StepChoosePlan({
   onBillingCycleChange,
   onPaymentComplete,
 }: StepChoosePlanProps) {
-  const { formatCurrency, currency, dynamicPricing } = useCurrency();
+  const { formatCurrency, currency, dynamicPricing, planDefinitions } = useCurrency();
   const [isProcessing, setIsProcessing] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [planWarning, setPlanWarning] = useState<string | null>(null);
 
+  const selectedPlanDef = getPlanDefinition(selectedPlan, planDefinitions);
   const isPaidPlanLocked =
     paymentCompleted &&
     selectedPlan !== "free" &&
-    !PLAN_DEFINITIONS[selectedPlan].isCustom;
+    !selectedPlanDef.isCustom;
 
   const handlePlanSelect = (planId: PlanId) => {
     if (isProcessing) {
@@ -61,7 +62,7 @@ export function StepChoosePlan({
 
     if (isPaidPlanLocked && planId !== selectedPlan) {
       setPlanWarning(
-        `Your current plan is ${PLAN_DEFINITIONS[selectedPlan].name}. You can change plans after completing onboarding.`
+        `Your current plan is ${selectedPlanDef.name}. You can change plans after completing onboarding.`
       );
       return;
     }
@@ -78,7 +79,8 @@ export function StepChoosePlan({
     try {
       const loaded = await loadRazorpayScript();
       if (!loaded) {
-        setPaymentError("Failed to load payment gateway. Please try again.");
+        console.error("Razorpay script failed to load.");
+        setPaymentError("Could not connect to Razorpay. Check your internet connection or disable ad-blockers.");
         setIsProcessing(false);
         return;
       }
@@ -101,16 +103,18 @@ export function StepChoosePlan({
         currency: order.currency,
         order_id: order.id,
         name: "Credibl5",
-        description: `${PLAN_DEFINITIONS[planId].name} Plan - ${billingCycle}`,
+        description: `${getPlanDefinition(planId, planDefinitions).name} Plan - ${billingCycle}`,
         prefill: { email: session.user?.email ?? undefined },
         theme: { color: "#0f172a" },
         handler: async (response: RazorpayResponse) => {
+          console.log("Razorpay payment modal success callback triggered.");
           try {
             const {
               data: { session: refreshedSession },
             } = await supabase.auth.getSession();
             const accessToken = refreshedSession?.access_token ?? session.access_token;
 
+            console.log("Invoking backend verification...");
             const verification = await verifyPayment(accessToken, {
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_order_id: response.razorpay_order_id,
@@ -119,12 +123,14 @@ export function StepChoosePlan({
               billing_cycle: billingCycle,
               currency: currency,
             });
+            console.log("Payment verification successful.");
             onPaymentComplete(verification.amount_paid_cents ?? order.amount);
           } catch (error) {
+            console.error("Verification callback failed:", error);
             setPaymentError(
               error instanceof Error
                 ? error.message
-                : "Payment verification failed. Please contact support."
+                : "Payment verification failed. If your money was deducted, please contact support with order ID: " + order.id
             );
           } finally {
             setIsProcessing(false);
@@ -171,7 +177,7 @@ export function StepChoosePlan({
               onClick={() => {
                 if (isPaidPlanLocked) {
                   setPlanWarning(
-                    `Your current plan is ${PLAN_DEFINITIONS[selectedPlan].name}. Billing cycle changes are available after onboarding.`
+                    `Your current plan is ${selectedPlanDef.name}. Billing cycle changes are available after onboarding.`
                   );
                   return;
                 }
@@ -188,7 +194,7 @@ export function StepChoosePlan({
 
       <div className="mt-8 grid gap-4 sm:grid-cols-2">
         {DISPLAY_PLANS.map((planId) => {
-          const plan = PLAN_DEFINITIONS[planId];
+          const plan = getPlanDefinition(planId, planDefinitions);
           const price = getPlanPrice(planId, billingCycle, dynamicPricing, currency) ?? 0;
           const isSelected = selectedPlan === planId;
           const isPaid = planId !== "free" && !plan.isCustom;

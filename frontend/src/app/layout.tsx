@@ -1,18 +1,7 @@
 import type { Metadata } from "next";
-import { Sora, Space_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
-
-const sora = Sora({
-  variable: "--font-sora",
-  subsets: ["latin"],
-});
-
-const spaceMono = Space_Mono({
-  variable: "--font-space-mono",
-  weight: ["400", "700"],
-  subsets: ["latin"],
-});
+import { Toaster } from "sonner";
 
 export const metadata: Metadata = {
   title: "Cradible5 - AI Review Management",
@@ -27,11 +16,12 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${sora.variable} ${spaceMono.variable} antialiased`}
+        className="antialiased"
         suppressHydrationWarning
       >
         <Providers>
           {children}
+          <Toaster position="top-right" richColors />
         </Providers>
       </body>
     </html>

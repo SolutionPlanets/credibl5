@@ -26,30 +26,27 @@ import { Button } from "@/components/ui/button";
 import { SiteFooter } from "@/components/marketing/site-footer";
 import { SiteHeader } from "@/components/marketing/site-header";
 import { useCurrency } from "@/lib/shared/currency-context";
-import { getPlanPrice } from "@/lib/shared/plan-config";
+import { getPlanPrice, getPlanDefinition, PLAN_ORDER, type PlanId } from "@/lib/shared/plan-config";
 
 // ==========================================
 // 1. Types & Static Data Extracted Outside Component
 // ==========================================
 type BillingCycle = "monthly" | "yearly";
 
-type PricingPlan = {
-  name: string;
-  buttonText: string;
-  popular?: boolean;
-  customPricing?: boolean;
-  monthlyPrice?: number;
-  yearlyPrice?: number;
-  description: string;
-  features: string[];
+// Plan display metadata not stored in DB (UI-only concerns)
+const PLAN_BUTTON_TEXT: Record<string, string> = {
+  free: "Start free",
+  starter: "Choose Basic",
+  growth: "Choose Pro",
+  agency: "Talk to sales",
 };
 
-type AddOn = {
-  credits: number;
-  price: number;
+const PLAN_DESCRIPTIONS: Record<string, string> = {
+  free: "A quick way to test workflows before committing.",
+  starter: "Best for small businesses building a steady reply habit.",
+  growth: "For teams that need speed, oversight, and more coverage.",
+  agency: "Flexible plans for multi-brand and multi-user teams.",
 };
-
-// Formatting logic is now handled by useCurrency hook
 
 const FEATURE_CARDS = [
   {
@@ -85,77 +82,6 @@ const SHOWCASE_STATS = [
   { label: "Review coverage", value: "Always on" },
 ];
 
-const PRICING_PLANS: PricingPlan[] = [
-  {
-    name: "Trial",
-    monthlyPrice: 0,
-    yearlyPrice: 0,
-    description: "A quick way to test workflows before committing.",
-    features: [
-      "15-day free trial",
-      "1 location max",
-      "Manual AI replies allowed",
-      "Auto Reply disabled",
-      "50 AI credits included",
-      "Standard email support",
-    ],
-    buttonText: "Start free",
-  },
-  {
-    name: "Basic",
-    monthlyPrice: 20,
-    yearlyPrice: 200,
-    description: "Best for small businesses building a steady reply habit.",
-    features: [
-      "2 active locations",
-      "100 AI credits/month",
-      "Auto Reply disabled",
-      "Brand voice setup",
-      "Saved response templates",
-      "Standard support",
-    ],
-    buttonText: "Choose Basic",
-  },
-  {
-    name: "Pro",
-    monthlyPrice: 50,
-    yearlyPrice: 500,
-    description: "For teams that need speed, oversight, and more coverage.",
-    features: [
-      "Up to 5 active locations",
-      "500 AI credits/month",
-      "Auto Reply enabled",
-      "Advanced brand voice training",
-      "Template builder",
-      "Priority support",
-      "Performance insights",
-    ],
-    popular: true,
-    buttonText: "Choose Pro",
-  },
-  {
-    name: "Custom",
-    customPricing: true,
-    description: "Flexible plans for multi-brand and multi-user teams.",
-    features: [
-      "Contact sales",
-      "Custom location count & credits",
-      "Auto Reply enabled",
-      "Team access and controls",
-      "Optional agency controls",
-      "White-label options",
-      "Dedicated onboarding",
-    ],
-    buttonText: "Talk to sales",
-  },
-];
-
-const ADD_ONS: AddOn[] = [
-  { credits: 50, price: 15 },
-  { credits: 150, price: 39 },
-  { credits: 400, price: 89 },
-];
-
 const BILLING_CYCLES = [
   { id: "monthly", label: "Monthly" },
   { id: "yearly", label: "Annual" },
@@ -167,7 +93,7 @@ const BILLING_CYCLES = [
 export default function Home() {
   const router = useRouter();
   const [billingCycle, setBillingCycle] = useState<BillingCycle>("monthly");
-  const { formatCurrency, dynamicPricing, currency } = useCurrency();
+  const { formatCurrency, dynamicPricing, currency, planDefinitions, addonPacks } = useCurrency();
 
   useEffect(() => {
     const supabase = createClient();
@@ -576,18 +502,18 @@ export default function Home() {
             </div>
 
             <div className="mt-14 grid gap-6 lg:grid-cols-4">
-              {PRICING_PLANS.map((plan) => {
+              {PLAN_ORDER.map((planId) => {
+                const plan = getPlanDefinition(planId, planDefinitions);
                 const isPopular = Boolean(plan.popular);
-                
-                const planIdMap: Record<string, string> = { Trial: "free", Basic: "starter", Pro: "growth" };
-                const planId = planIdMap[plan.name] || "free";
-                
+                const isCustom = Boolean(plan.isCustom);
                 const price = getPlanPrice(planId, billingCycle, dynamicPricing, currency) ?? 0;
                 const period = billingCycle === "monthly" ? "/month" : "/year";
+                const buttonText = PLAN_BUTTON_TEXT[planId] || "Get started";
+                const description = PLAN_DESCRIPTIONS[planId] || "";
 
                 return (
                   <div
-                    key={plan.name}
+                    key={planId}
                     className={
                       isPopular
                         ? "relative rounded-[2rem] border border-slate-950 bg-slate-950 p-8 text-white shadow-2xl shadow-slate-900/15"
@@ -601,12 +527,12 @@ export default function Home() {
                     )}
 
                     <div className={isPopular ? "text-slate-300 font-semibold" : "text-slate-500 font-semibold"}>
-                      {plan.name}
+                      {plan.shortName}
                     </div>
 
                     <div className="mt-3 text-4xl font-extrabold tracking-tight">
-                      {plan.customPricing ? "Custom" : formatCurrency(price)}
-                      {!plan.customPricing && (
+                      {isCustom ? "Custom" : formatCurrency(price)}
+                      {!isCustom && (
                         <span className={`ml-1 text-base font-medium ${isPopular ? "text-slate-400" : "text-slate-500"}`}>
                           {period}
                         </span>
@@ -614,11 +540,11 @@ export default function Home() {
                     </div>
 
                     <p className={`mt-4 text-[15px] leading-relaxed ${isPopular ? "text-slate-300" : "text-slate-600"}`}>
-                      {plan.description}
+                      {description}
                     </p>
 
                     <ul className="mt-8 space-y-4">
-                      {plan.features.map((feature) => (
+                      {plan.pricingFeatures.map((feature) => (
                         <li key={feature} className="flex gap-3 text-[14px] font-medium leading-relaxed">
                           <Check
                             className={`mt-0.5 size-4 flex-shrink-0 ${isPopular ? "text-cyan-300" : "text-emerald-600"}`}
@@ -635,12 +561,10 @@ export default function Home() {
                           : "mt-8 h-12 w-full rounded-full bg-slate-950 font-bold text-white shadow-sm hover:bg-slate-800"
                       }
                       onClick={() => {
-                        if (plan.customPricing) {
+                        if (isCustom) {
                           router.push("/contact");
                           return;
                         }
-                        const planIdMap: Record<string, string> = { Trial: "free", Basic: "starter", Pro: "growth" };
-                        const planId = planIdMap[plan.name] || "free";
                         const params = new URLSearchParams();
                         if (planId !== "free") {
                           params.set("plan", planId);
@@ -649,7 +573,7 @@ export default function Home() {
                         router.push(`/auth/signup${params.toString() ? `?${params}` : ""}`);
                       }}
                     >
-                      {plan.buttonText}
+                      {buttonText}
                     </Button>
                   </div>
                 );
@@ -678,9 +602,9 @@ export default function Home() {
               </div>
 
               <div className="mt-8 grid gap-4 sm:grid-cols-3">
-                {ADD_ONS.map((addon) => (
+                {(addonPacks ?? []).map((addon) => (
                   <div
-                    key={addon.credits}
+                    key={addon.plan_type}
                     className="rounded-2xl border border-slate-200/60 bg-white px-6 py-5 shadow-sm"
                   >
                     <div className="text-3xl font-extrabold tracking-tight text-slate-900">
@@ -690,7 +614,7 @@ export default function Home() {
                       extra replies
                     </div>
                     <div className="mt-4 text-lg font-bold text-reply-purple">
-                      {formatCurrency(addon.price)}
+                      {formatCurrency(addon.pricing[currency] ?? 0)}
                     </div>
                   </div>
                 ))}

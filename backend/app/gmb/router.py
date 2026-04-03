@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Optional, Tuple
 
@@ -11,7 +12,8 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.core.deps import get_bearer_token, get_google_oauth, get_supabase_gateway
+from app.core.deps import get_app_settings, get_bearer_token, get_google_oauth, get_supabase_gateway
+from app.core.settings import Settings
 from app.gmb.oauth import GoogleOAuthService, GoogleReconnectRequired
 from app.gmb.helper import (
     convert_star_rating,
@@ -26,11 +28,16 @@ from app.gmb.helper import (
 )
 from app.core.supabase_gateway import SupabaseGateway
 from app.core.rate_limit import create_rate_limit, RateLimiter
+from app.templates.review_reply_prompt import build_review_reply_prompt, ensure_sign_off, parse_reply_output, sanitize_reply
+from app.templates.escalation import check_escalation
 
 router = APIRouter()
 
 _save_location_limit = create_rate_limit(max_requests=20, window_seconds=60)
 _reply_limit = create_rate_limit(max_requests=5, window_seconds=60)
+_bulk_reply_limit = create_rate_limit(max_requests=2, window_seconds=60)
+_bulk_ai_limit = create_rate_limit(max_requests=2, window_seconds=120)
+_single_ai_limit = create_rate_limit(max_requests=10, window_seconds=60)
 _sync_per_location_limiter = RateLimiter(max_requests=2, window_seconds=60)
 
 # Simple in-memory cache
@@ -134,6 +141,37 @@ class ReplyReviewRequest(BaseModel):
     locationId: str   # Supabase location UUID
     gmbReviewId: str  # Google review identifier (full path or short ID)
     reply: str
+
+
+class BulkReplyItem(BaseModel):
+    gmbReviewId: str
+    locationId: str
+    reply: str
+
+
+class BulkReplyRequest(BaseModel):
+    items: List[BulkReplyItem]
+    source: str = "bulk_template_reply"  # "bulk_template_reply" or "bulk_ai_reply"
+
+
+class SingleAIGenerateRequest(BaseModel):
+    gmbReviewId: str
+    locationId: str
+    reviewerName: str = "Customer"
+    starRating: int = 0
+    reviewText: str = ""
+
+
+class BulkAIGenerateItem(BaseModel):
+    gmbReviewId: str
+    locationId: str
+    reviewerName: str = "Customer"
+    starRating: int = 0
+    reviewText: str = ""
+
+
+class BulkAIGenerateRequest(BaseModel):
+    items: List[BulkAIGenerateItem]
 
 
 def _parse_iso_datetime(value: Any) -> Optional[datetime]:
@@ -685,3 +723,460 @@ async def reply_review(
         if is_auth_error(exc):
             _invalidate_access_token_cache(user.id)
         raise HTTPException(status_code=500, detail=get_error_message(exc))
+
+
+# ---------------------------------------------------------------------------
+# Bulk reply helpers
+# ---------------------------------------------------------------------------
+
+async def _resolve_review_path(
+    supabase: SupabaseGateway,
+    user_id: str,
+    location_id: str,
+    gmb_review_id: str,
+) -> str:
+    """Build the full Google review path from IDs."""
+    if (
+        gmb_review_id.startswith("accounts/")
+        and "/locations/" in gmb_review_id
+        and "/reviews/" in gmb_review_id
+    ):
+        return gmb_review_id
+
+    location = await supabase.get_location_for_user_by_id(user_id, location_id)
+    if not location:
+        raise HTTPException(status_code=404, detail=f"Location {location_id} not found.")
+
+    acc_id = location["gmb_account_id"].split("/")[-1]
+    loc_id = location["location_id"].split("/")[-1]
+    review_id = gmb_review_id.split("/")[-1]
+    return f"accounts/{acc_id}/locations/{loc_id}/reviews/{review_id}"
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/bulk-reply
+# ---------------------------------------------------------------------------
+
+@router.post("/reviews/bulk-reply")
+async def bulk_reply_reviews(
+    body: BulkReplyRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    google_oauth: Annotated[GoogleOAuthService, Depends(get_google_oauth)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+    _rate_limit: Annotated[None, Depends(_bulk_reply_limit)] = None,
+) -> Dict[str, Any]:
+    if len(body.items) == 0:
+        raise HTTPException(status_code=400, detail="No items provided.")
+    if len(body.items) > 25:
+        raise HTTPException(status_code=400, detail="Maximum 25 reviews per bulk request.")
+
+    for item in body.items:
+        text = item.reply.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail=f"Reply for {item.gmbReviewId} is empty.")
+        if len(text) > 4096:
+            raise HTTPException(status_code=400, detail=f"Reply for {item.gmbReviewId} exceeds 4096 chars.")
+
+    user = await supabase.get_user_from_access_token(access_token)
+    google_token = await _get_access_token(user.id, supabase, google_oauth)
+
+    async def _refresh_cb() -> str:
+        return await _force_refresh_access_token(user.id, supabase, google_oauth)
+
+    results: List[Dict[str, Any]] = []
+    succeeded = 0
+    failed = 0
+
+    rule_name = body.source
+
+    for item in body.items:
+        try:
+            review_path = await _resolve_review_path(
+                supabase, user.id, item.locationId, item.gmbReviewId
+            )
+            google_reply = await upsert_gmb_review_reply(
+                access_token=google_token,
+                review_path=review_path,
+                reply_comment=item.reply.strip(),
+                refresh_callback=_refresh_cb,
+            )
+            posted_reply = google_reply.get("comment", item.reply.strip())
+            results.append({
+                "gmbReviewId": item.gmbReviewId,
+                "success": True,
+                "reply": posted_reply,
+            })
+            succeeded += 1
+
+            # Log to auto_reply_logs
+            await supabase.log_bulk_reply(
+                user_id=user.id,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                action="replied",
+                rule_name=rule_name,
+                reply_text=posted_reply,
+                credits_consumed=1 if rule_name == "bulk_ai_reply" else 0,
+            )
+        except Exception as exc:
+            logger.error("Bulk reply failed for %s: %s", item.gmbReviewId, exc)
+            results.append({
+                "gmbReviewId": item.gmbReviewId,
+                "success": False,
+                "error": str(exc),
+            })
+            failed += 1
+
+            # Log failure
+            await supabase.log_bulk_reply(
+                user_id=user.id,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                action="skipped_error",
+                rule_name=rule_name,
+                error_message=str(exc),
+            )
+
+    return {
+        "total": len(body.items),
+        "succeeded": succeeded,
+        "failed": failed,
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/bulk-ai-generate
+# ---------------------------------------------------------------------------
+
+async def _fetch_brand_voice_for_location(
+    settings: Settings,
+    user_id: str,
+    location_id: str,
+) -> Dict[str, Any]:
+    """Fetch brand voice settings for a location using service role."""
+    import httpx as _httpx
+
+    headers = {
+        "apikey": settings.service_role_key,
+        "Authorization": f"Bearer {settings.service_role_key}",
+    }
+    url = f"{settings.supabase_url}/rest/v1/brand_voices"
+    params = {
+        "select": "*",
+        "user_id": f"eq.{user_id}",
+        "location_id": f"eq.{location_id}",
+        "limit": "1",
+    }
+
+    async with _httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url, headers=headers, params=params)
+
+    if resp.status_code < 400 and resp.json():
+        return resp.json()[0]
+    return {}
+
+
+@router.post("/reviews/bulk-ai-generate")
+async def bulk_ai_generate(
+    body: BulkAIGenerateRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    _rate_limit: Annotated[None, Depends(_bulk_ai_limit)] = None,
+) -> Dict[str, Any]:
+    if len(body.items) == 0:
+        raise HTTPException(status_code=400, detail="No items provided.")
+    if len(body.items) > 25:
+        raise HTTPException(status_code=400, detail="Maximum 25 reviews per bulk request.")
+
+    user = await supabase.get_user_from_access_token(access_token)
+    count = len(body.items)
+
+    # Check credits upfront
+    credit_info = await supabase.get_ai_credits(user.id)
+    if credit_info["remaining_ai_credits"] < count:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_CREDITS",
+                "message": (
+                    f"You need {count} AI credit(s) but have "
+                    f"{credit_info['remaining_ai_credits']} remaining."
+                ),
+                "remaining_ai_credits": credit_info["remaining_ai_credits"],
+                "credits_needed": count,
+            },
+        )
+
+    # Deduct credits atomically upfront
+    await supabase.deduct_ai_credits(user.id, count)
+
+    # Setup Gemini
+    api_key = settings.gemini_api_key
+    if not api_key:
+        await supabase.add_addon_ai_credits(user.id, count)
+        raise HTTPException(status_code=500, detail="AI service is not configured.")
+
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+
+    # Fetch brand voice (use first item's location — UI enforces single location)
+    first_location_id = body.items[0].locationId
+    bv = await _fetch_brand_voice_for_location(settings, user.id, first_location_id)
+
+    location = await supabase.get_location_for_user_by_id(user.id, first_location_id)
+    business_name = bv.get("business_name") or (location["location_name"] if location else "Our Business")
+
+    results: List[Dict[str, Any]] = []
+    succeeded = 0
+    failed = 0
+
+    for item in body.items:
+        try:
+            # Escalation pre-check (no LLM call)
+            escalation = check_escalation(item.reviewText or "")
+            if escalation.should_escalate:
+                results.append({
+                    "gmbReviewId": item.gmbReviewId,
+                    "success": False,
+                    "escalated": True,
+                    "reason": escalation.reason,
+                })
+                failed += 1
+                continue
+
+            prompt = build_review_reply_prompt(
+                business_name=business_name,
+                reviewer_name=item.reviewerName or "Customer",
+                star_rating=item.starRating,
+                review_text=item.reviewText or "",
+                brand_voice=bv,
+                support_contact=bv.get("support_contact"),
+                allow_emojis=bv.get("allow_emojis", False),
+            )
+
+            result = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt,
+            )
+            raw_output = result.text.strip()
+
+            # Check if LLM triggered escalation
+            parsed = parse_reply_output(raw_output)
+            if parsed["escalated"]:
+                results.append({
+                    "gmbReviewId": item.gmbReviewId,
+                    "success": False,
+                    "escalated": True,
+                    "reason": parsed["reason"],
+                })
+                failed += 1
+                continue
+
+            reply = sanitize_reply(parsed["reply"])
+            reply = ensure_sign_off(reply, bv)
+
+            results.append({
+                "gmbReviewId": item.gmbReviewId,
+                "success": True,
+                "generatedReply": reply,
+            })
+            succeeded += 1
+
+            await supabase.log_ai_usage(
+                user_id=user.id,
+                action_type="bulk_ai_generate",
+                credits_used=1,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                review_response_id=str(uuid.uuid4()),
+                reviewer_name=item.reviewerName,
+                model_name="gemini-2.5-flash-lite",
+                request_meta={
+                    "source": "bulk_ai_generate",
+                    "generated_reply": reply,
+                    "star_rating": item.starRating,
+                    "review_text": item.reviewText,
+                },
+            )
+
+            # Log to auto_reply_logs
+            await supabase.log_bulk_reply(
+                user_id=user.id,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                action="replied",
+                rule_name="bulk_ai_reply",
+                reply_text=reply,
+                credits_consumed=1,
+            )
+
+        except Exception as exc:
+            logger.error("Bulk AI generate failed for %s: %s", item.gmbReviewId, exc)
+            results.append({
+                "gmbReviewId": item.gmbReviewId,
+                "success": False,
+                "error": str(exc),
+            })
+            failed += 1
+
+            await supabase.log_bulk_reply(
+                user_id=user.id,
+                location_id=item.locationId,
+                review_id=item.gmbReviewId,
+                action="skipped_error",
+                rule_name="bulk_ai_reply",
+                error_message=str(exc),
+            )
+
+    # Refund credits for failed generations
+    if failed > 0:
+        try:
+            await supabase.add_addon_ai_credits(user.id, failed)
+        except Exception as exc:
+            logger.error("Failed to refund %d credits for user %s: %s", failed, user.id[:8], exc)
+
+    return {
+        "total": count,
+        "succeeded": succeeded,
+        "failed": failed,
+        "creditsUsed": succeeded,
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/generate-reply  (single review AI reply)
+# ---------------------------------------------------------------------------
+
+@router.post("/reviews/generate-reply")
+async def single_ai_generate_reply(
+    body: SingleAIGenerateRequest,
+    supabase: Annotated[SupabaseGateway, Depends(get_supabase_gateway)],
+    access_token: Annotated[str, Depends(get_bearer_token)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    _rate_limit: Annotated[None, Depends(_single_ai_limit)] = None,
+) -> Dict[str, Any]:
+    """Generate an AI reply for a single review using the location's brand voice."""
+
+    user = await supabase.get_user_from_access_token(access_token)
+
+    # Check credits
+    credit_info = await supabase.get_ai_credits(user.id)
+    if credit_info["remaining_ai_credits"] < 1:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_CREDITS",
+                "message": (
+                    f"You need 1 AI credit but have "
+                    f"{credit_info['remaining_ai_credits']} remaining. "
+                    "Purchase more credits or upgrade your plan."
+                ),
+                "remaining_ai_credits": credit_info["remaining_ai_credits"],
+            },
+        )
+
+    # Deduct 1 credit upfront
+    await supabase.deduct_ai_credits(user.id, 1)
+
+    # Check Gemini API key
+    api_key = settings.gemini_api_key
+    if not api_key:
+        await supabase.add_addon_ai_credits(user.id, 1)
+        raise HTTPException(status_code=500, detail="AI service is not configured.")
+
+    # Escalation pre-check (no LLM call, saves credits)
+    escalation = check_escalation(body.reviewText or "")
+    if escalation.should_escalate:
+        await supabase.add_addon_ai_credits(user.id, 1)
+        return {
+            "success": False,
+            "escalated": True,
+            "reason": escalation.reason,
+            "generatedReply": None,
+            "creditsUsed": 0,
+        }
+
+    # Fetch brand voice for the location
+    bv = await _fetch_brand_voice_for_location(settings, user.id, body.locationId)
+    if not bv:
+        await supabase.add_addon_ai_credits(user.id, 1)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "NO_BRAND_VOICE",
+                "message": "No brand voice configured for this location. Please create a brand voice first and try again.",
+            },
+        )
+
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+
+    location = await supabase.get_location_for_user_by_id(user.id, body.locationId)
+    business_name = bv.get("business_name") or (location["location_name"] if location else "Our Business")
+
+    prompt = build_review_reply_prompt(
+        business_name=business_name,
+        reviewer_name=body.reviewerName or "Customer",
+        star_rating=body.starRating,
+        review_text=body.reviewText or "",
+        brand_voice=bv,
+        support_contact=bv.get("support_contact"),
+        allow_emojis=bv.get("allow_emojis", False),
+    )
+
+    try:
+        result = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+        )
+        raw_output = result.text.strip()
+
+        # Check if LLM triggered escalation (nuanced cases regex missed)
+        parsed = parse_reply_output(raw_output)
+        if parsed["escalated"]:
+            await supabase.add_addon_ai_credits(user.id, 1)
+            return {
+                "success": False,
+                "escalated": True,
+                "reason": parsed["reason"],
+                "generatedReply": None,
+                "creditsUsed": 0,
+            }
+
+        reply = sanitize_reply(parsed["reply"])
+        reply = ensure_sign_off(reply, bv)
+
+    except Exception as exc:
+        logger.error("Single AI generate failed for %s: %s", body.gmbReviewId, exc)
+        await supabase.add_addon_ai_credits(user.id, 1)
+        raise HTTPException(status_code=502, detail=f"AI generation failed: {exc}")
+
+    # Log AI usage with rich metadata
+    await supabase.log_ai_usage(
+        user_id=user.id,
+        action_type="generate_reply",
+        credits_used=1,
+        location_id=body.locationId,
+        review_id=body.gmbReviewId,
+        review_response_id=str(uuid.uuid4()),
+        reviewer_name=body.reviewerName,
+        model_name="gemini-2.5-flash-lite",
+        request_meta={
+            "source": "single_ai_generate",
+            "generated_reply": reply,
+            "star_rating": body.starRating,
+            "review_text": body.reviewText,
+        },
+    )
+
+    return {
+        "success": True,
+        "escalated": False,
+        "generatedReply": reply,
+        "creditsUsed": 1,
+    }
